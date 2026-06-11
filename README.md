@@ -114,28 +114,6 @@ Run Automation Tests
 
 ---
 
-## Current Status
-
-### Completed
-
-* Chrome Extension setup
-* DOM scanning
-* Locator generation
-* JSON export
-* Popup UI
-
-### Planned
-
-* Smart Page Model Generation
-* AI Business Element Detection
-* Gherkin Generation
-* Selenium Page Object Generation
-* Step Definition Generation
-* Test Runner Integration
-* Daily Report Generation
-
----
-
 ## Roadmap
 
 ### Phase 1
