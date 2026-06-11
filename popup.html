@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Locator Scanner</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <header class="popup-header">
+        <h1>Locator Scanner</h1>
+        <p id="status" class="status" role="status">Ready to scan.</p>
+      </header>
+
+      <section class="actions" aria-label="Scanner actions">
+        <button id="scanBtn" class="primary-button" type="button">
+          Scan Current Page
+        </button>
+        <button id="exportBtn" class="secondary-button" type="button" disabled>
+          Export element.dom.json
+        </button>
+      </section>
+
+      <section class="summary-panel" aria-labelledby="summaryTitle">
+        <h2 id="summaryTitle">Summary</h2>
+        <dl id="summary" class="summary">
+          <div>
+            <dt>URL</dt>
+            <dd>-</dd>
+          </div>
+          <div>
+            <dt>Title</dt>
+            <dd>-</dd>
+          </div>
+          <div>
+            <dt>Total elements</dt>
+            <dd>0</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="preview-panel" aria-labelledby="previewTitle">
+        <h2 id="previewTitle">JSON Preview</h2>
+        <pre id="preview" class="preview">(no scan yet)</pre>
+      </section>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
