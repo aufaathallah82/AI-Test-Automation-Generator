@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Locator Scanner Extension",
+  "name": "AI Test Automation Generator",
   "version": "1.0.0",
-  "description": "Scan the active page DOM and export structured locator data as element.dom.json.",
+  "description": "Record interactions, analyze DOM behavior, and export AI-ready automation models for Selenium, Playwright, Cypress, and Gherkin.",
   "action": {
-    "default_title": "Locator Scanner",
+    "default_title": "AI Test Automation Generator",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",

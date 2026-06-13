@@ -3,45 +3,83 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Locator Scanner</title>
+    <title>AI Test Automation Generator</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <main class="popup">
       <header class="popup-header">
-        <h1>Locator Scanner</h1>
-        <p id="status" class="status" role="status">Ready to scan.</p>
+        <h1>AI Test Automation Generator</h1>
+        <p id="status" class="status" role="status">Ready to generate automation model.</p>
       </header>
 
-      <section class="actions" aria-label="Scanner actions">
+      <section class="actions" aria-label="Automation generator actions">
         <button id="scanBtn" class="primary-button" type="button">
-          Scan Current Page
+          Analyze Page DOM
+        </button>
+        <button id="startCaptureBtn" class="secondary-button" type="button">
+          Start Snapshot Recording
+        </button>
+        <button id="stopCaptureBtn" class="secondary-button" type="button" disabled>
+          Stop Snapshot Recording
+        </button>
+        <button id="startInteractionBtn" class="secondary-button" type="button">
+          Start Interaction Recording
+        </button>
+        <button id="stopInteractionBtn" class="secondary-button" type="button" disabled>
+          Stop Interaction Recording
+        </button>
+        <button id="clearInteractionBtn" class="secondary-button" type="button">
+          Clear Interaction History
         </button>
         <button id="exportBtn" class="secondary-button" type="button" disabled>
-          Export element.dom.json
+          Export AI Model JSON
         </button>
       </section>
 
+      <fieldset class="scan-options" aria-label="Scan options">
+        <label>
+          <input id="visibleOnly" type="radio" name="visibilityMode" value="visible" checked />
+          Visible Only
+        </label>
+        <label>
+          <input id="includeHidden" type="radio" name="visibilityMode" value="hidden" />
+          Include Hidden Elements
+        </label>
+      </fieldset>
+
       <section class="summary-panel" aria-labelledby="summaryTitle">
-        <h2 id="summaryTitle">Summary</h2>
+        <h2 id="summaryTitle">Automation Model Summary</h2>
         <dl id="summary" class="summary">
           <div>
-            <dt>URL</dt>
-            <dd>-</dd>
+            <dt>Total Elements</dt>
+            <dd>0</dd>
           </div>
           <div>
-            <dt>Title</dt>
-            <dd>-</dd>
+            <dt>Total Snapshots</dt>
+            <dd>0</dd>
           </div>
           <div>
-            <dt>Total elements</dt>
+            <dt>Automation Readiness</dt>
+            <dd>0</dd>
+          </div>
+          <div>
+            <dt>Warning Count</dt>
+            <dd>0</dd>
+          </div>
+          <div>
+            <dt>Recorded Actions</dt>
+            <dd>0</dd>
+          </div>
+          <div>
+            <dt>Recorded Flows</dt>
             <dd>0</dd>
           </div>
         </dl>
       </section>
 
       <section class="preview-panel" aria-labelledby="previewTitle">
-        <h2 id="previewTitle">JSON Preview</h2>
+        <h2 id="previewTitle">AI Model JSON Preview</h2>
         <pre id="preview" class="preview">(no scan yet)</pre>
       </section>
     </main>

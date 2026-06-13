@@ -79,18 +79,29 @@ h2 {
 
 .actions {
   display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 8px;
   margin-bottom: 14px;
 }
 
+#scanBtn,
+#startInteractionBtn,
+#stopInteractionBtn,
+#clearInteractionBtn,
+#exportBtn {
+  grid-column: 1 / -1;
+}
+
 button {
   width: 100%;
-  min-height: 40px;
+  min-height: 38px;
   border: 0;
   border-radius: 6px;
   padding: 10px 12px;
   font: inherit;
   font-weight: 700;
+  line-height: 1.2;
+  white-space: normal;
   cursor: pointer;
 }
 
@@ -117,6 +128,33 @@ button:disabled {
   background: var(--secondary-hover);
 }
 
+.scan-options {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  margin: 0 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--panel);
+}
+
+.scan-options label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--text);
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.scan-options input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
 .summary-panel,
 .preview-panel {
   margin-top: 12px;
@@ -133,7 +171,7 @@ button:disabled {
 
 .summary div {
   display: grid;
-  grid-template-columns: 98px minmax(0, 1fr);
+  grid-template-columns: 128px minmax(0, 1fr);
   gap: 8px;
   align-items: start;
 }

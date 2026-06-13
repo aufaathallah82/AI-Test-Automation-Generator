@@ -1,0 +1,45 @@
+{
+  "metadata": {
+    "projectName": "AI Test Automation Generator",
+    "description": "Record user interactions, analyze DOM behavior, and generate AI-ready automation models for Selenium, Playwright, Cypress, and Gherkin generation.",
+    "exportType": "AI-ready automation model",
+    "exportFileName": "ai-test-automation-model.json",
+    "generatedAt": "",
+    "targetFrameworks": [
+      "Selenium",
+      "Playwright",
+      "Cypress",
+      "Gherkin"
+    ],
+    "capabilities": [
+      "DOM scanning",
+      "Locator generation",
+      "Automation readiness scoring",
+      "Snapshot recording",
+      "Interaction recording",
+      "JSON export",
+      "Hidden element filtering",
+      "Duplicate locator detection",
+      "Smart locator rating"
+    ]
+  },
+  "pageName": "",
+  "url": "",
+  "title": "",
+  "scanDate": "",
+  "totalElements": 0,
+  "automationScore": 0,
+  "automationReadiness": {
+    "score": 0,
+    "strengths": [],
+    "weaknesses": []
+  },
+  "warnings": [],
+  "elements": [],
+  "snapshots": [],
+  "recordedActionsCount": 0,
+  "recordedFlowsCount": 0,
+  "recordedActions": [],
+  "userFlows": [],
+  "interactionSummary": []
+}

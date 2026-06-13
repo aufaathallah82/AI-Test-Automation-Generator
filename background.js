@@ -1,3 +1,3 @@
 chrome.runtime.onInstalled.addListener(() => {
-  console.log("Locator Scanner Extension installed.");
+  console.log("AI Test Automation Generator installed.");
 });

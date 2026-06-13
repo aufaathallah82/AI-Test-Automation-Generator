@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/locator-scanner-extension.iml" filepath="$PROJECT_DIR$/locator-scanner-extension.iml" />
+      <module fileurl="file://$PROJECT_DIR$/AI-Test-Automation-Generator.iml" filepath="$PROJECT_DIR$/AI-Test-Automation-Generator.iml" />
     </modules>
   </component>
 </project>
