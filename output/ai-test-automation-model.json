@@ -1,6 +1,7 @@
 {
   "metadata": {
     "projectName": "AI Test Automation Generator",
+    "modelVersion": "0.2.0",
     "description": "Record user interactions, analyze DOM behavior, and generate AI-ready automation models for Selenium, Playwright, Cypress, and Gherkin generation.",
     "exportType": "AI-ready automation model",
     "exportFileName": "ai-test-automation-model.json",
@@ -31,8 +32,12 @@
   "automationScore": 0,
   "automationReadiness": {
     "score": 0,
+    "businessElementScore": 0,
+    "locatorQualityScore": 0,
+    "interactionReadinessScore": 0,
     "strengths": [],
-    "weaknesses": []
+    "weaknesses": [],
+    "recommendations": []
   },
   "warnings": [],
   "elements": [],

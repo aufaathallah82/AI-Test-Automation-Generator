@@ -8,6 +8,15 @@ const SCANNED_ELEMENT_SELECTOR = [
   "form",
   "iframe",
   "img",
+  "svg",
+  "path",
+  "use",
+  "i",
+  'span[class*="icon" i]',
+  'span[class*="material-icons" i]',
+  'span[class*="material-symbol" i]',
+  'span[class*="fa-" i]',
+  "span[data-icon]",
   '[role="button"]',
   '[role="link"]',
   '[role="checkbox"]',
@@ -55,6 +64,29 @@ const DYNAMIC_UI_SELECTOR = [
 ].join(",");
 
 const CAPTURE_ELEMENT_SELECTOR = `${SCANNED_ELEMENT_SELECTOR},${DYNAMIC_UI_SELECTOR}`;
+const VISUAL_TARGET_SELECTOR = [
+  "svg",
+  "path",
+  "use",
+  "img",
+  "i",
+  'span[class*="icon" i]',
+  'span[class*="material-icons" i]',
+  'span[class*="material-symbol" i]',
+  'span[class*="fa-" i]',
+  "span[data-icon]"
+].join(",");
+const INTERACTIVE_ANCESTOR_SELECTOR = [
+  "button",
+  "a[href]",
+  'input[type="button"]',
+  'input[type="submit"]',
+  'input[type="reset"]',
+  '[role="button"]',
+  '[role="link"]',
+  "[onclick]",
+  "[tabindex]"
+].join(",");
 const TEST_ID_ATTRIBUTES = ["data-testid", "data-cy", "data-test"];
 const VISIBILITY_ATTRIBUTES = [
   "class",
@@ -66,6 +98,9 @@ const VISIBILITY_ATTRIBUTES = [
   "role"
 ];
 const WARNING_TYPES = [
+  "Duplicate data-testid",
+  "Duplicate data-cy",
+  "Duplicate data-test",
   "Duplicate CSS selector",
   "Duplicate XPath",
   "Duplicate text locator",
@@ -94,6 +129,13 @@ const AUTOMATION_CAPABILITIES = [
   "Duplicate locator detection",
   "Smart locator rating"
 ];
+const MODEL_VERSION = "0.2.0";
+const ISSUE_SEVERITY_RANK = {
+  none: 0,
+  low: 1,
+  medium: 2,
+  high: 3
+};
 
 let captureObserver = null;
 let capturedSnapshots = [];
@@ -110,10 +152,10 @@ let pendingInteractionTimer = null;
 
 function scanDomElements(options = {}) {
   const includeHidden = Boolean(options.includeHidden);
-  const elements = Array.from(document.querySelectorAll(SCANNED_ELEMENT_SELECTOR)).filter(
+  const elements = Array.from(document.querySelectorAll(CAPTURE_ELEMENT_SELECTOR)).filter(
     (element) => !shouldIgnoreElement(element)
   );
-  const allScannedElements = elements.map((element) => buildElementSnapshot(element));
+  const allScannedElements = dedupeAutomationSourceElements(elements).map((element) => buildElementSnapshot(element));
   const hiddenElementCount = allScannedElements.filter((element) => !element.isVisible).length;
   const scannedElements = includeHidden
     ? allScannedElements
@@ -152,6 +194,7 @@ function scanDomElements(options = {}) {
 function buildExportMetadata(generatedAt) {
   return {
     projectName: PRODUCT_NAME,
+    modelVersion: MODEL_VERSION,
     description: PRODUCT_DESCRIPTION,
     exportType: "AI-ready automation model",
     exportFileName: EXPORT_FILE_NAME,
@@ -162,39 +205,470 @@ function buildExportMetadata(generatedAt) {
 }
 
 function buildElementSnapshot(element, options = {}) {
-  const isDetached = Boolean(options.detached) || !element?.isConnected;
-  const tag = element?.tagName ? element.tagName.toLowerCase() : "";
-  const type = getElementType(element);
-  const text = getElementText(element);
-  const role = getRole(element);
-  const css = isDetached ? generateDetachedCssSelector(element) : generateStableCssSelector(element);
-  const xpath = isDetached ? "" : generateXPath(element);
+  const targetDetails = resolveAutomationTarget(element);
+  const target = targetDetails.actualElement || element;
+  const visualElement = targetDetails.visualElement || null;
+  const isDetached = Boolean(options.detached) || !target?.isConnected;
+  const tag = target?.tagName ? target.tagName.toLowerCase() : "";
+  const type = getElementType(target);
+  const text = getElementText(target);
+  const role = getRole(target);
+  const labelText = getAssociatedLabelText(target) || getAriaLabelledByText(target);
+  const css = isDetached ? generateDetachedCssSelector(target) : generateStableCssSelector(target);
+  const xpath = isDetached ? "" : generateXPath(target);
   const textLocator = buildTextLocator(role, text);
-  const locatorChoice = chooseBestLocator(element, css, xpath, role, text);
+  const locatorChoice = chooseBestLocator(target, css, xpath, role, text);
+  const isVisible = !isDetached && isElementVisible(target);
+  const isInteractive = isInteractiveAutomationElement(target);
+  const visualTarget = buildVisualTargetSummary(visualElement);
+  const elementCategory = classifyElementCategory(target, {
+    isInteractive,
+    visualElement,
+    sourceElement: element
+  });
 
-  return {
-    elementName: generateElementName(element, text),
+  const snapshot = {
+    elementName: generateElementName(target, text),
     tag,
     type,
     text,
     textLocator,
-    id: element?.id || "",
-    name: element?.getAttribute("name") || "",
-    className: element?.getAttribute("class") || "",
-    placeholder: element?.getAttribute("placeholder") || "",
-    ariaLabel: element?.getAttribute("aria-label") || "",
+    elementCategory,
+    isInteractive,
+    id: target?.id || "",
+    name: target?.getAttribute("name") || "",
+    className: target?.getAttribute("class") || "",
+    placeholder: target?.getAttribute("placeholder") || "",
+    ariaLabel: target?.getAttribute("aria-label") || "",
+    labelText,
     role,
-    href: getHref(element),
-    src: getSrc(element),
+    href: getHref(target),
+    src: getSrc(target),
+    testAttributes: getTestAttributes(target),
+    domContext: getElementDomContext(target),
     css,
     xpath,
     bestLocator: locatorChoice.bestLocator,
     locatorType: locatorChoice.locatorType,
     confidence: locatorChoice.confidence,
     reason: locatorChoice.reason,
-    isVisible: !isDetached && isElementVisible(element),
-    locatorIssue: ""
+    isVisible,
+    actualTarget: {},
+    visualTarget,
+    targetingReason: targetDetails.targetingReason,
+    locatorIssue: "",
+    issueSeverity: "none"
   };
+
+  snapshot.actualTarget = buildActualTargetSummary(snapshot);
+  return snapshot;
+}
+
+function dedupeAutomationSourceElements(elements) {
+  const byTarget = new Map();
+
+  for (const element of elements) {
+    const targetDetails = resolveAutomationTarget(element);
+    const target = targetDetails.actualElement || element;
+    if (!(target instanceof Element)) {
+      continue;
+    }
+
+    const existing = byTarget.get(target);
+    if (!existing || getAutomationSourcePriority(element, targetDetails) > existing.priority) {
+      byTarget.set(target, {
+        element,
+        priority: getAutomationSourcePriority(element, targetDetails)
+      });
+    }
+  }
+
+  return Array.from(byTarget.values()).map((entry) => entry.element);
+}
+
+function getAutomationSourcePriority(element, targetDetails) {
+  let priority = 0;
+  if (targetDetails.visualElement) {
+    priority += 4;
+  }
+  if (targetDetails.actualElement && targetDetails.actualElement !== element) {
+    priority += 2;
+  }
+  if (isInteractiveAutomationElement(element)) {
+    priority += 1;
+  }
+  return priority;
+}
+
+function resolveAutomationTarget(element) {
+  if (!(element instanceof Element)) {
+    return {
+      actualElement: element,
+      visualElement: null,
+      targetingReason: ""
+    };
+  }
+
+  const visualElement = getVisualTargetElement(element);
+  if (visualElement) {
+    const interactiveAncestor = getNearestInteractiveAncestor(visualElement);
+    if (interactiveAncestor) {
+      return {
+        actualElement: interactiveAncestor,
+        visualElement,
+        targetingReason:
+          "SVG/IMG is inside an interactive parent, so the parent element is better for automation."
+      };
+    }
+
+    if (isInteractiveAutomationElement(visualElement)) {
+      return {
+        actualElement: visualElement,
+        visualElement,
+        targetingReason: "Visual media has its own interaction handler, so it can be automated directly."
+      };
+    }
+
+    return {
+      actualElement: visualElement,
+      visualElement,
+      targetingReason: ""
+    };
+  }
+
+  const embeddedVisualTarget = findEmbeddedVisualTarget(element);
+  if (embeddedVisualTarget && isInteractiveAutomationElement(element)) {
+    return {
+      actualElement: element,
+      visualElement: embeddedVisualTarget,
+      targetingReason:
+        "SVG/IMG is inside an interactive parent, so the parent element is better for automation."
+    };
+  }
+
+  return {
+    actualElement: element,
+    visualElement: null,
+    targetingReason: ""
+  };
+}
+
+function getVisualTargetElement(element) {
+  if (!(element instanceof Element)) {
+    return null;
+  }
+
+  const tag = element.tagName.toLowerCase();
+  if (["path", "use"].includes(tag)) {
+    return element.closest("svg") || element;
+  }
+
+  return isVisualTargetElement(element) ? element : null;
+}
+
+function findEmbeddedVisualTarget(element) {
+  if (!(element instanceof Element) || !element.querySelector) {
+    return null;
+  }
+
+  const candidate = element.querySelector(VISUAL_TARGET_SELECTOR);
+  return candidate ? getVisualTargetElement(candidate) : null;
+}
+
+function isVisualTargetElement(element) {
+  if (!(element instanceof Element)) {
+    return false;
+  }
+
+  const tag = element.tagName.toLowerCase();
+  return ["svg", "path", "use", "img", "i"].includes(tag) || isSpanIconElement(element);
+}
+
+function isSpanIconElement(element) {
+  if (!(element instanceof Element) || element.tagName.toLowerCase() !== "span") {
+    return false;
+  }
+
+  const tokens = getElementTokens(element);
+  return (
+    element.hasAttribute("data-icon") ||
+    /(^|\s)(icon|material-icons|material-symbols|fa|fas|far|fal|fab)(\s|$)/i.test(
+      element.getAttribute("class") || ""
+    ) ||
+    /\b(icon|material-icons|material-symbol|fa-)/i.test(tokens)
+  );
+}
+
+function getNearestInteractiveAncestor(element) {
+  let current = element instanceof Element ? element.parentElement : null;
+
+  while (current && current !== document.documentElement) {
+    if (matchesSelector(current, INTERACTIVE_ANCESTOR_SELECTOR) && isInteractiveParentCandidate(current)) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+
+  return null;
+}
+
+function isInteractiveParentCandidate(element) {
+  if (!(element instanceof Element)) {
+    return false;
+  }
+
+  const tag = element.tagName.toLowerCase();
+  const type = getElementType(element);
+  const role = getRole(element);
+
+  return (
+    tag === "button" ||
+    (tag === "a" && Boolean(element.getAttribute("href"))) ||
+    (tag === "input" && ["button", "submit", "reset"].includes(type)) ||
+    ["button", "link"].includes(role) ||
+    hasClickHandlerSignal(element) ||
+    hasTabIndexClickSignal(element)
+  );
+}
+
+function isInteractiveAutomationElement(element) {
+  if (!(element instanceof Element)) {
+    return false;
+  }
+
+  const tag = element.tagName.toLowerCase();
+  const type = getElementType(element);
+  const role = getRole(element);
+
+  return (
+    tag === "button" ||
+    (tag === "a" && Boolean(element.getAttribute("href"))) ||
+    (tag === "input" && type !== "hidden") ||
+    ["select", "textarea"].includes(tag) ||
+    ["button", "link", "checkbox", "radio", "textbox", "combobox", "listbox", "option", "tab"].includes(role) ||
+    (element instanceof HTMLElement && element.isContentEditable) ||
+    hasClickHandlerSignal(element) ||
+    hasTabIndexClickSignal(element)
+  );
+}
+
+function hasClickHandlerSignal(element) {
+  return Boolean(
+    element instanceof Element &&
+      (element.hasAttribute("onclick") || (typeof element.onclick === "function" && element.onclick))
+  );
+}
+
+function hasTabIndexClickSignal(element) {
+  if (!(element instanceof Element) || !element.hasAttribute("tabindex")) {
+    return false;
+  }
+
+  const tabIndex = Number(element.getAttribute("tabindex"));
+  return tabIndex >= 0 && (hasClickHandlerSignal(element) || ["button", "link"].includes(getRole(element)));
+}
+
+function buildActualTargetSummary(snapshot) {
+  return {
+    tag: snapshot.tag || "",
+    elementName: snapshot.elementName || "",
+    elementCategory: snapshot.elementCategory || "unknown",
+    role: snapshot.role || "",
+    text: snapshot.text || "",
+    bestLocator: snapshot.bestLocator || "",
+    locatorType: snapshot.locatorType || "",
+    confidence: Number(snapshot.confidence) || 0,
+    isVisible: Boolean(snapshot.isVisible)
+  };
+}
+
+function buildVisualTargetSummary(element) {
+  if (!(element instanceof Element)) {
+    return {
+      tag: "",
+      alt: "",
+      ariaLabel: "",
+      title: "",
+      className: ""
+    };
+  }
+
+  return {
+    tag: element.tagName.toLowerCase(),
+    alt: element.getAttribute("alt") || "",
+    ariaLabel: element.getAttribute("aria-label") || "",
+    title: getVisualTargetTitle(element),
+    className: element.getAttribute("class") || ""
+  };
+}
+
+function getVisualTargetTitle(element) {
+  if (!(element instanceof Element)) {
+    return "";
+  }
+
+  const directTitle = element.getAttribute("title");
+  if (directTitle) {
+    return normalizeText(directTitle);
+  }
+
+  const svgTitle = element.tagName.toLowerCase() === "svg" ? element.querySelector("title") : null;
+  return normalizeText(svgTitle?.textContent || "");
+}
+
+function getTestAttributes(element) {
+  const attributes = {};
+
+  for (const attribute of TEST_ID_ATTRIBUTES) {
+    const value = element?.getAttribute?.(attribute);
+    if (value) {
+      attributes[attribute] = value;
+    }
+  }
+
+  return attributes;
+}
+
+function getElementDomContext(element) {
+  if (!(element instanceof Element)) {
+    return "";
+  }
+
+  if (element.closest("footer, [role='contentinfo']")) {
+    return "footer";
+  }
+  if (element.closest("nav, [role='navigation']")) {
+    return "navigation";
+  }
+  if (element.closest("[role='dialog'], [aria-modal='true'], [class*='modal' i], [class*='dialog' i]")) {
+    return "dialog";
+  }
+  if (element.closest("form")) {
+    return "form";
+  }
+  if (element.closest("header, [role='banner']")) {
+    return "header";
+  }
+  if (element.closest("main, [role='main']")) {
+    return "main";
+  }
+
+  return "";
+}
+
+function classifyElementCategory(element, options = {}) {
+  if (!(element instanceof Element)) {
+    return "unknown";
+  }
+
+  const tag = element.tagName.toLowerCase();
+  const role = getRole(element);
+  const type = getElementType(element);
+  const tokens = getElementTokens(element);
+  const isInteractive = Boolean(options.isInteractive);
+
+  if (element.getAttribute("aria-modal") === "true" || /\bmodal\b/i.test(tokens)) {
+    return "modal";
+  }
+  if (role === "dialog" || tag === "dialog" || /\bdialog\b/i.test(tokens)) {
+    return "dialog";
+  }
+  if (element.getAttribute("aria-live") || ["alert", "status"].includes(role) || /(toast|snackbar|notification)/i.test(tokens)) {
+    return "toast";
+  }
+  if (role === "tooltip" || /tooltip/i.test(tokens)) {
+    return "tooltip";
+  }
+  if (!["input", "textarea", "select"].includes(tag) && /(validation|invalid|error|field-error)/i.test(tokens)) {
+    return "validationMessage";
+  }
+  if (tag === "table" || role === "table" || /\btable\b/i.test(tokens)) {
+    return "table";
+  }
+  if (
+    !["input", "textarea", "select"].includes(tag) &&
+    (["combobox", "listbox", "menu", "option"].includes(role) || /(dropdown|select-menu|menu|popover)/i.test(tokens))
+  ) {
+    return "dropdown";
+  }
+  if (tag === "nav" || role === "navigation") {
+    return "navigation";
+  }
+  if (["input", "textarea", "select"].includes(tag)) {
+    return "formControl";
+  }
+  if (tag === "button" || role === "button" || ["button", "submit", "reset"].includes(type)) {
+    return "button";
+  }
+  if (tag === "a" && element.getAttribute("href")) {
+    return "link";
+  }
+  if (role === "link") {
+    return "link";
+  }
+  if (isVisualTargetElement(element)) {
+    if (isInteractive) {
+      return "button";
+    }
+    return isDecorativeMediaElement(element) ? "decorativeMedia" : "media";
+  }
+
+  if (options.visualElement && !isInteractive) {
+    return isDecorativeMediaElement(options.visualElement) ? "decorativeMedia" : "media";
+  }
+
+  return "unknown";
+}
+
+function isDecorativeMediaElement(element) {
+  if (!(element instanceof Element)) {
+    return false;
+  }
+
+  const tag = element.tagName.toLowerCase();
+  const role = element.getAttribute("role") || "";
+  const tokens = getElementTokens(element);
+  const hiddenFromAccessibility = element.getAttribute("aria-hidden") === "true" || ["presentation", "none"].includes(role);
+
+  if (hiddenFromAccessibility) {
+    return true;
+  }
+
+  if (tag === "img") {
+    const alt = element.getAttribute("alt");
+    if (alt === "") {
+      return true;
+    }
+    return !normalizeText(alt) && /(logo|sprite|icon|decorative|spacer|tracking)/i.test(tokens);
+  }
+
+  if (["svg", "path", "use", "i"].includes(tag) || isSpanIconElement(element)) {
+    return !getVisualTargetAccessibleName(element) || /(decorative|sprite|chevron|caret)/i.test(tokens);
+  }
+
+  return false;
+}
+
+function getVisualTargetAccessibleName(element) {
+  if (!(element instanceof Element)) {
+    return "";
+  }
+
+  return normalizeText(
+    element.getAttribute("aria-label") ||
+      element.getAttribute("alt") ||
+      getAriaLabelledByText(element) ||
+      getVisualTargetTitle(element)
+  );
+}
+
+function getEmbeddedVisualLabel(element) {
+  if (!(element instanceof Element) || !element.querySelector) {
+    return "";
+  }
+
+  const visualTarget = findEmbeddedVisualTarget(element);
+  return getVisualTargetAccessibleName(visualTarget);
 }
 
 function startCapture(options = {}) {
@@ -370,31 +844,38 @@ function getInteractionTarget(event) {
     return event.target instanceof Element ? event.target : null;
   }
 
-  const target = event.target instanceof Element ? event.target : null;
-  if (!target) {
+  const rawTarget = event.target instanceof Element ? event.target : null;
+  if (!rawTarget) {
     return null;
   }
 
-  return (
-    target.closest(
-      [
-        "button",
-        "a[href]",
-        "input",
-        "select",
-        "textarea",
-        "form",
-        "iframe",
-        "[role='button']",
-        "[role='link']",
-        "[role='checkbox']",
-        "[role='radio']",
-        "[role='textbox']",
-        "[role='combobox']",
-        "[contenteditable='true']"
-      ].join(",")
-    ) || target
+  const resolvedTarget = resolveAutomationTarget(rawTarget).actualElement;
+  if (resolvedTarget instanceof Element && resolvedTarget !== rawTarget) {
+    return resolvedTarget;
+  }
+
+  const closestTarget = rawTarget.closest(
+    [
+      "button",
+      "a[href]",
+      "input",
+      "select",
+      "textarea",
+      "form",
+      "iframe",
+      "[role='button']",
+      "[role='link']",
+      "[onclick]",
+      "[tabindex]",
+      "[role='checkbox']",
+      "[role='radio']",
+      "[role='textbox']",
+      "[role='combobox']",
+      "[contenteditable='true']"
+    ].join(",")
   );
+
+  return closestTarget && isInteractiveAutomationElement(closestTarget) ? closestTarget : rawTarget;
 }
 
 function getInteractionActionType(event, target) {
@@ -569,13 +1050,23 @@ function buildUserFlow(interaction) {
   const action = {
     type: interaction.action.actionType,
     elementName: interaction.action.triggerElement.name,
+    actualTarget: interaction.action.triggerElement.actualTarget || {},
+    visualTarget: interaction.action.triggerElement.visualTarget || buildVisualTargetSummary(null),
+    bestLocator: interaction.action.triggerElement.bestLocator || interaction.action.triggerElement.locator,
     locator: interaction.action.triggerElement.locator,
     locatorType: interaction.action.triggerElement.locatorType,
     confidence: interaction.action.triggerElement.confidence,
+    elementCategory: interaction.action.triggerElement.elementCategory || "unknown",
+    targetingReason: interaction.action.triggerElement.targetingReason || "",
     text: interaction.action.triggerElement.text,
     value: interaction.action.value,
     key: interaction.action.key
   };
+
+  action.humanReadableStep = buildHumanReadableActionStep(action);
+  result.newElements = capturedElements;
+  result.humanReadableResult = buildHumanReadableResult(result);
+
   const flow = {
     timestamp: interaction.action.timestamp,
     flowName: buildFlowName(action, result),
@@ -583,7 +1074,8 @@ function buildUserFlow(interaction) {
     trigger: getActionTriggerLabel(action),
     action,
     result,
-    capturedElements
+    capturedElements,
+    gherkinSuggestion: buildGherkinSuggestion(action, result)
   };
 
   flow.summarySteps = buildFlowSummarySteps(flow);
@@ -843,7 +1335,9 @@ function normalizeUserFlows(flows) {
         trigger: flow.trigger || "",
         action: flow.action || {},
         result: flow.result || {},
-        capturedElements: Array.isArray(flow.capturedElements) ? flow.capturedElements : []
+        capturedElements: Array.isArray(flow.capturedElements) ? flow.capturedElements : [],
+        gherkinSuggestion: flow.gherkinSuggestion || {},
+        summarySteps: Array.isArray(flow.summarySteps) ? flow.summarySteps : []
       }))
     : [];
 }
@@ -855,8 +1349,159 @@ function buildInteractionSummary(flows) {
   }));
 }
 
+function buildHumanReadableActionStep(action) {
+  const targetLabel = getReadableActionTargetLabel(action);
+  const visualTag = action.visualTarget?.tag || "";
+  const visualPhrase = visualTag ? ` represented by ${getVisualTargetPhrase(visualTag)}` : "";
+
+  if (action.type === "input typing") {
+    return `Type into ${targetLabel}.`;
+  }
+
+  if (action.type === "checkbox selection") {
+    return `Select ${removeTrailingWord(targetLabel, "checkbox")} checkbox.`;
+  }
+
+  if (action.type === "radio selection") {
+    return `Select ${removeTrailingWord(targetLabel, "radio")} radio option.`;
+  }
+
+  if (action.type === "dropdown selection") {
+    return `Select ${action.value || "an option"} from ${targetLabel}.`;
+  }
+
+  if (action.type === "form submission") {
+    return `Submit ${removeTrailingWord(targetLabel, "form")} form.`;
+  }
+
+  if (action.type?.startsWith("keyboard ")) {
+    return `Press ${action.key || action.type.replace("keyboard ", "")} on ${targetLabel}.`;
+  }
+
+  return `${toReadableName(action.type || "Interact")} ${targetLabel}${visualPhrase}.`.trim();
+}
+
+function buildHumanReadableResult(result) {
+  return buildResultSummaryStep(result);
+}
+
+function buildGherkinSuggestion(action, result) {
+  return {
+    when: buildGherkinWhen(action),
+    then: buildGherkinThen(result)
+  };
+}
+
+function buildGherkinWhen(action) {
+  const targetLabel = getReadableActionTargetLabel(action);
+
+  if (action.type === "input typing") {
+    return `When user enters text into ${targetLabel}`;
+  }
+
+  if (action.type === "dropdown selection") {
+    return `When user selects ${action.value || "an option"} from ${targetLabel}`;
+  }
+
+  if (action.type === "checkbox selection" || action.type === "radio selection") {
+    return `When user selects ${targetLabel}`;
+  }
+
+  if (action.type === "form submission") {
+    return `When user submits ${removeTrailingWord(targetLabel, "form")} form`;
+  }
+
+  if (action.type?.startsWith("keyboard ")) {
+    return `When user presses ${action.key || action.type.replace("keyboard ", "")} on ${targetLabel}`;
+  }
+
+  return `When user ${getGherkinActionVerb(action.type)} ${targetLabel}`;
+}
+
+function buildGherkinThen(result) {
+  if (!result || result.type === "none") {
+    return "Then no visible UI change should occur";
+  }
+
+  const title = result.title || toReadableName(result.name || result.type);
+  const subject = title || getResultDisplayType(result.type);
+
+  if (result.interactionType === "page navigation") {
+    return "Then the expected page should be loaded";
+  }
+
+  if (result.interactionType === "new window opened") {
+    return "Then a new window should be opened";
+  }
+
+  if (result.interactionType === "form submitted") {
+    return `Then ${subject} should be submitted`;
+  }
+
+  if (result.interactionType?.includes("closed")) {
+    return `Then ${subject} should be closed`;
+  }
+
+  return `Then ${subject} should be displayed`;
+}
+
+function getReadableActionTargetLabel(action) {
+  const label = getActionTriggerLabel(action);
+  const targetKind = getActionTargetKind(action);
+
+  if (!targetKind || label.toLowerCase().endsWith(targetKind)) {
+    return label;
+  }
+
+  return `${label} ${targetKind}`;
+}
+
+function getActionTargetKind(action) {
+  const actualTag = action.actualTarget?.tag || action.tag || "";
+  const category = action.elementCategory || action.actualTarget?.elementCategory || "";
+  const role = action.actualTarget?.role || action.role || "";
+
+  if (category === "button" || actualTag === "button" || role === "button") {
+    return "button";
+  }
+  if (category === "link" || actualTag === "a" || role === "link") {
+    return "link";
+  }
+  if (category === "formControl") {
+    return "field";
+  }
+  if (category === "dropdown" || role === "combobox" || role === "listbox") {
+    return "dropdown";
+  }
+
+  return "";
+}
+
+function getVisualTargetPhrase(tag) {
+  if (tag === "svg") {
+    return "an SVG icon";
+  }
+  if (tag === "img") {
+    return "an image";
+  }
+  return `a ${tag} icon`;
+}
+
+function getGherkinActionVerb(actionType) {
+  if (actionType === "double click") {
+    return "double-clicks";
+  }
+  if (actionType === "click") {
+    return "clicks";
+  }
+  return toReadableName(actionType || "interacts with").toLowerCase();
+}
+
 function buildFlowSummarySteps(flow) {
-  const steps = [buildActionSummaryStep(flow.action), buildResultSummaryStep(flow.result)].filter(Boolean);
+  const steps = [
+    flow.action?.humanReadableStep || buildActionSummaryStep(flow.action),
+    flow.result?.humanReadableResult || buildResultSummaryStep(flow.result)
+  ].filter(Boolean);
   const importantElements = (flow.capturedElements || [])
     .filter((element) => isImportantAvailableElement(element, flow.action))
     .slice(0, 4);
@@ -951,12 +1596,18 @@ function buildBusinessElementFromSnapshot(snapshot, options = {}) {
   return {
     name: toBusinessIdentifier(nameSource, suffix),
     locator: snapshot.bestLocator || snapshot.css || snapshot.xpath || "",
+    bestLocator: snapshot.bestLocator || snapshot.css || snapshot.xpath || "",
     locatorType: snapshot.locatorType || "",
     confidence: Number(snapshot.confidence) || 0,
     text: snapshot.text || "",
     tag: snapshot.tag || "",
     role: snapshot.role || "",
-    isVisible: Boolean(snapshot.isVisible)
+    elementCategory: snapshot.elementCategory || "unknown",
+    isInteractive: Boolean(snapshot.isInteractive),
+    isVisible: Boolean(snapshot.isVisible),
+    actualTarget: snapshot.actualTarget || buildActualTargetSummary(snapshot),
+    visualTarget: snapshot.visualTarget || buildVisualTargetSummary(null),
+    targetingReason: snapshot.targetingReason || ""
   };
 }
 
@@ -964,24 +1615,28 @@ function inferBusinessElementSuffix(snapshot) {
   const tag = snapshot.tag || "";
   const role = snapshot.role || "";
   const type = snapshot.type || "";
+  const category = snapshot.elementCategory || "";
   const tokens = `${snapshot.className || ""} ${snapshot.id || ""} ${role}`.toLowerCase();
 
-  if (role === "dialog" || /modal|dialog/.test(tokens)) {
+  if (category === "modal" || role === "dialog" || /modal|dialog/.test(tokens)) {
     return "Modal";
+  }
+  if (category === "dialog") {
+    return "Dialog";
   }
   if (/drawer/.test(tokens)) {
     return "Drawer";
   }
-  if (role === "tooltip" || /tooltip/.test(tokens)) {
+  if (category === "tooltip" || role === "tooltip" || /tooltip/.test(tokens)) {
     return "Tooltip";
   }
-  if (["alert", "status"].includes(role) || /toast|snackbar|notification/.test(tokens)) {
+  if (category === "toast" || ["alert", "status"].includes(role) || /toast|snackbar|notification/.test(tokens)) {
     return "Toast";
   }
-  if (tag === "button" || role === "button" || ["button", "submit", "reset"].includes(type)) {
+  if (category === "button" || tag === "button" || role === "button" || ["button", "submit", "reset"].includes(type)) {
     return "Button";
   }
-  if (tag === "a" || role === "link") {
+  if (category === "link" || tag === "a" || role === "link") {
     return "Link";
   }
   if (type === "checkbox" || role === "checkbox") {
@@ -990,10 +1645,10 @@ function inferBusinessElementSuffix(snapshot) {
   if (type === "radio" || role === "radio") {
     return "Radio";
   }
-  if (tag === "select" || ["combobox", "listbox"].includes(role)) {
+  if (category === "dropdown" || tag === "select" || ["combobox", "listbox"].includes(role)) {
     return "Dropdown";
   }
-  if (tag === "textarea" || role === "textbox" || isTextInputType(type)) {
+  if (category === "formControl" || tag === "textarea" || role === "textbox" || isTextInputType(type)) {
     return "Input";
   }
   if (tag === "form" || role === "form") {
@@ -1002,7 +1657,7 @@ function inferBusinessElementSuffix(snapshot) {
   if (tag === "iframe") {
     return "Iframe";
   }
-  if (tag === "table" || role === "table") {
+  if (category === "table" || tag === "table" || role === "table") {
     return "Table";
   }
   if (role === "tab") {
@@ -1140,7 +1795,13 @@ function getResultTitle(element, resultType) {
     }
   }
 
-  return normalizeText(element.innerText || element.textContent || element.getAttribute("name") || element.id).slice(0, 80);
+  return normalizeText(
+    element.innerText ||
+      element.textContent ||
+      getEmbeddedVisualLabel(element) ||
+      element.getAttribute("name") ||
+      element.id
+  ).slice(0, 80);
 }
 
 function getResultNameSuffix(type) {
@@ -1237,11 +1898,11 @@ function getResultDisplayType(type) {
 }
 
 function isImportantAvailableElement(element, action) {
-  if (!element?.isVisible || !element.locator || element.locator === action?.locator) {
+  if (!element?.isVisible || !element.locator || [action?.locator, action?.bestLocator].includes(element.locator)) {
     return false;
   }
 
-  return ["button", "input", "select", "textarea", "form", "a"].includes(element.tag) || ["button", "link"].includes(element.role);
+  return isBusinessRelevantSnapshot(element);
 }
 
 function toReadableElementLabel(element) {
@@ -1249,6 +1910,7 @@ function toReadableElementLabel(element) {
   const suffix = inferBusinessElementSuffix({
     tag: element.tag,
     role: element.role,
+    elementCategory: element.elementCategory,
     type: "",
     className: "",
     id: ""
@@ -1361,9 +2023,11 @@ function collectSnapshotElements(root, options = {}) {
     }
   }
 
-  return uniqueElements(candidates)
-    .filter((element) => !shouldIgnoreElement(element))
-    .filter((element) => includeHidden || detached || isElementVisible(element))
+  return dedupeAutomationSourceElements(
+    uniqueElements(candidates)
+      .filter((element) => !shouldIgnoreElement(element))
+      .filter((element) => includeHidden || detached || isElementVisible(element))
+  )
     .slice(0, MAX_SNAPSHOT_ELEMENTS)
     .map((element) => buildElementSnapshot(element, { detached }));
 }
@@ -1486,36 +2150,49 @@ function normalizeSnapshots(snapshots) {
 }
 
 function applyLocatorIssues(elements) {
-  const warningCounts = new Map();
+  const warningMap = new Map();
 
   for (const element of elements) {
     element.locatorIssue = "";
+    element.issueSeverity = "none";
   }
 
-  markDuplicateIssue(elements, "id", "Non-unique ID", warningCounts);
-  markDuplicateIssue(elements, "css", "Duplicate CSS selector", warningCounts);
-  markDuplicateIssue(elements, "xpath", "Duplicate XPath", warningCounts);
-  markDuplicateIssue(elements, "textLocator", "Duplicate text locator", warningCounts);
+  for (const attribute of TEST_ID_ATTRIBUTES) {
+    markDuplicateIssue(elements, attribute, `Duplicate ${attribute}`, warningMap);
+  }
+
+  markDuplicateIssue(elements, "id", "Non-unique ID", warningMap);
+  markDuplicateIssue(elements, "css", "Duplicate CSS selector", warningMap);
+  markDuplicateIssue(elements, "xpath", "Duplicate XPath", warningMap);
+  markDuplicateIssue(elements, "textLocator", "Duplicate text locator", warningMap);
 
   const dynamicElements = elements.filter(isDynamicLocatorElement);
-  if (dynamicElements.length) {
-    warningCounts.set("Dynamic locator detected", dynamicElements.length);
-    for (const element of dynamicElements) {
-      setLocatorIssue(element, "Dynamic locator detected");
-    }
+  for (const element of dynamicElements) {
+    const severity = getDynamicIssueSeverity(element);
+    setLocatorIssue(element, "Dynamic locator detected", severity);
+    addIssueWarning(warningMap, {
+      type: "Dynamic locator detected",
+      count: 1,
+      severity,
+      affectedCategory: element.elementCategory || "unknown",
+      recommendation: "Use stable test attributes for interactive elements with generated IDs or classes."
+    });
   }
 
-  return WARNING_TYPES.filter((type) => warningCounts.has(type)).map((type) => ({
-    type,
-    count: warningCounts.get(type)
-  }));
+  return Array.from(warningMap.values()).sort((left, right) => {
+    const typeOrder = WARNING_TYPES.indexOf(left.type) - WARNING_TYPES.indexOf(right.type);
+    if (typeOrder !== 0) {
+      return typeOrder;
+    }
+    return ISSUE_SEVERITY_RANK[right.severity] - ISSUE_SEVERITY_RANK[left.severity];
+  });
 }
 
-function markDuplicateIssue(elements, key, issueType, warningCounts) {
+function markDuplicateIssue(elements, key, issueType, warningMap) {
   const groups = new Map();
 
   for (const element of elements) {
-    const value = normalizeCollisionValue(element[key], key);
+    const value = normalizeCollisionValue(getCollisionValue(element, key), key);
     if (!value) {
       continue;
     }
@@ -1526,26 +2203,199 @@ function markDuplicateIssue(elements, key, issueType, warningCounts) {
     groups.get(value).push(element);
   }
 
-  let duplicateCount = 0;
   for (const group of groups.values()) {
     if (group.length <= 1) {
       continue;
     }
 
-    duplicateCount += group.length;
+    const severity = getDuplicateIssueSeverity(group, key, issueType);
+    const affectedCategory = getAffectedCategory(group);
+    const recommendation = getDuplicateIssueRecommendation(group, key, issueType, severity);
     for (const element of group) {
-      setLocatorIssue(element, issueType);
+      setLocatorIssue(element, issueType, severity);
     }
-  }
-
-  if (duplicateCount) {
-    warningCounts.set(issueType, duplicateCount);
+    addIssueWarning(warningMap, {
+      type: issueType,
+      count: group.length,
+      severity,
+      affectedCategory,
+      recommendation
+    });
   }
 }
 
-function setLocatorIssue(element, issueType) {
-  if (!element.locatorIssue) {
+function getCollisionValue(element, key) {
+  if (TEST_ID_ATTRIBUTES.includes(key)) {
+    return element.testAttributes?.[key] || "";
+  }
+
+  return element[key] || "";
+}
+
+function getDuplicateIssueSeverity(group, key, issueType) {
+  if (group.every((element) => element.elementCategory === "decorativeMedia")) {
+    return "low";
+  }
+
+  if (key === "textLocator" && group.every(isLowImpactRepeatedNavigationElement)) {
+    return "low";
+  }
+
+  if (TEST_ID_ATTRIBUTES.includes(key)) {
+    return hasDifferentBusinessActions(group) || group.filter(isBusinessActionSnapshot).length > 1 ? "high" : "medium";
+  }
+
+  if (issueType === "Duplicate text locator") {
+    const actionButtons = group.filter((element) => element.elementCategory === "button" && element.isInteractive);
+    if (actionButtons.length > 1) {
+      return "high";
+    }
+    return group.some(isBusinessRelevantSnapshot) ? "medium" : "low";
+  }
+
+  if (issueType === "Duplicate XPath") {
+    return group.some(isBusinessActionSnapshot) ? "high" : "medium";
+  }
+
+  if (issueType === "Duplicate CSS selector") {
+    return group.some(isBusinessActionSnapshot) ? "high" : "medium";
+  }
+
+  if (issueType === "Non-unique ID") {
+    return group.some(isBusinessActionSnapshot) ? "high" : "medium";
+  }
+
+  return group.some(isBusinessRelevantSnapshot) ? "medium" : "low";
+}
+
+function getDynamicIssueSeverity(element) {
+  if (element.elementCategory === "decorativeMedia") {
+    return "low";
+  }
+
+  if (isBusinessActionSnapshot(element)) {
+    return "high";
+  }
+
+  return isBusinessRelevantSnapshot(element) ? "medium" : "low";
+}
+
+function getAffectedCategory(group) {
+  const categories = Array.from(
+    new Set(group.map((element) => element.elementCategory || "unknown").filter(Boolean))
+  );
+
+  if (categories.length === 1) {
+    return categories[0];
+  }
+
+  const priority = ["button", "formControl", "link", "dropdown", "modal", "dialog", "table", "media"];
+  return priority.find((category) => categories.includes(category)) || "mixed";
+}
+
+function getDuplicateIssueRecommendation(group, key, issueType, severity) {
+  if (severity === "low") {
+    return "Low-impact repeated locator; prioritize business actions before changing this locator.";
+  }
+
+  if (TEST_ID_ATTRIBUTES.includes(key)) {
+    return "Use unique test attributes for different business actions.";
+  }
+
+  if (issueType === "Duplicate text locator") {
+    return "Use a parent container or data-testid to disambiguate repeated buttons.";
+  }
+
+  if (issueType === "Duplicate XPath") {
+    return "Avoid using long XPath as primary locator.";
+  }
+
+  if (issueType === "Duplicate CSS selector" && group.some((element) => element.locatorType === "css")) {
+    return "Add data-testid to repeated action buttons.";
+  }
+
+  if (issueType === "Non-unique ID") {
+    return "Use unique id values or prefer data-testid for automation targets.";
+  }
+
+  return "Add stable, unique locators to business-critical elements.";
+}
+
+function hasDifferentBusinessActions(group) {
+  const businessElements = group.filter(isBusinessRelevantSnapshot);
+  const names = new Set(
+    businessElements
+      .map((element) => normalizeText(element.elementName || element.text || element.ariaLabel || element.bestLocator).toLowerCase())
+      .filter(Boolean)
+  );
+
+  return businessElements.length > 1 && names.size > 1;
+}
+
+function isLowImpactRepeatedNavigationElement(element) {
+  return (
+    ["footer", "navigation", "header"].includes(element.domContext || "") &&
+    ["link", "navigation", "unknown"].includes(element.elementCategory || "unknown")
+  );
+}
+
+function isBusinessRelevantSnapshot(element) {
+  if (!element || element.elementCategory === "decorativeMedia") {
+    return false;
+  }
+
+  if (element.elementCategory === "media" && !element.isInteractive) {
+    return false;
+  }
+
+  return (
+    Boolean(element.isInteractive) ||
+    [
+      "formControl",
+      "button",
+      "link",
+      "modal",
+      "dialog",
+      "dropdown",
+      "toast",
+      "validationMessage",
+      "table"
+    ].includes(element.elementCategory)
+  );
+}
+
+function isBusinessActionSnapshot(element) {
+  return (
+    isBusinessRelevantSnapshot(element) &&
+    (Boolean(element.isInteractive) || ["button", "formControl", "link", "dropdown"].includes(element.elementCategory))
+  );
+}
+
+function addIssueWarning(warningMap, warning) {
+  const severity = warning.severity || "medium";
+  const affectedCategory = warning.affectedCategory || "unknown";
+  const key = `${warning.type}|${severity}|${affectedCategory}|${warning.recommendation || ""}`;
+  const existing = warningMap.get(key);
+
+  if (existing) {
+    existing.count += warning.count || 0;
+    return;
+  }
+
+  warningMap.set(key, {
+    type: warning.type,
+    count: warning.count || 0,
+    severity,
+    affectedCategory,
+    recommendation: warning.recommendation || ""
+  });
+}
+
+function setLocatorIssue(element, issueType, severity = "medium") {
+  const currentSeverity = element.issueSeverity || "none";
+  if (ISSUE_SEVERITY_RANK[severity] >= ISSUE_SEVERITY_RANK[currentSeverity]) {
     element.locatorIssue = issueType;
+    element.issueSeverity = severity;
   }
 }
 
@@ -1574,36 +2424,91 @@ function isDynamicLocatorElement(element) {
 }
 
 function calculateAutomationReadiness(elements, warnings, metrics) {
-  const total = elements.length || 1;
-  const warningCountByType = new Map(warnings.map((warning) => [warning.type, warning.count]));
-  const testAttributeCount = elements.filter(hasTestAttributeSnapshot).length;
-  const uniqueIdCount = countUniqueValues(elements, "id");
-  const uniqueNameCount = countUniqueValues(elements, "name");
-  const visibleCount = elements.filter((element) => element.isVisible).length;
-  const cssFallbackCount = elements.filter((element) => element.locatorType === "css").length;
-  const xpathFallbackCount = elements.filter((element) => element.locatorType === "xpath").length;
-  const longXPathCount = elements.filter((element) => isLongXPath(element.xpath)).length;
+  const businessElements = elements.filter(isBusinessRelevantSnapshot);
+  const scoringElements = businessElements.length
+    ? businessElements
+    : elements.filter((element) => element.elementCategory !== "decorativeMedia");
+  const total = scoringElements.length || 1;
+  const interactiveElements = scoringElements.filter((element) => element.isInteractive);
+  const actionElements = scoringElements.filter(
+    (element) => ["button", "link"].includes(element.elementCategory) || element.isInteractive
+  );
+  const formControls = scoringElements.filter((element) => element.elementCategory === "formControl");
+  const visibleBusinessCount = scoringElements.filter((element) => element.isVisible).length;
+  const visibleInteractiveCount = interactiveElements.filter((element) => element.isVisible).length;
+  const testAttributeCount = scoringElements.filter(hasTestAttributeSnapshot).length;
+  const uniqueIdCount = countUniqueValues(scoringElements, "id");
+  const uniqueNameCount = countUniqueValues(scoringElements, "name");
+  const stableAriaLabelCount = scoringElements.filter(hasStableAriaLabelSnapshot).length;
+  const labeledFormControlCount = formControls.filter(hasFormControlLabelSnapshot).length;
+  const namedActionCount = actionElements.filter(hasAccessibleNameSnapshot).length;
+  const missingAccessibleNameCount = actionElements.filter(isMissingAccessibleNameSnapshot).length;
+  const highIssueCount = scoringElements.filter((element) => element.issueSeverity === "high").length;
+  const mediumIssueCount = scoringElements.filter((element) => element.issueSeverity === "medium").length;
+  const dynamicInteractiveCount = scoringElements.filter(
+    (element) => isBusinessActionSnapshot(element) && isDynamicLocatorElement(element)
+  ).length;
+  const cssFallbackCount = scoringElements.filter((element) => element.locatorType === "css").length;
+  const xpathFallbackCount = scoringElements.filter((element) => element.locatorType === "xpath").length;
+  const longXPathCount = scoringElements.filter(
+    (element) => element.locatorType === "xpath" && isLongXPath(element.bestLocator || element.xpath)
+  ).length;
   const iframeCount = elements.filter((element) => element.tag === "iframe").length;
-  const hiddenElementCount = metrics.hiddenElementCount || 0;
+  const hiddenInteractiveCount = interactiveElements.filter(
+    (element) => !element.isVisible && !isHiddenLowImpactSnapshot(element)
+  ).length;
+  const formLabelRatio = formControls.length ? labeledFormControlCount / formControls.length : 1;
+  const actionNameRatio = actionElements.length ? namedActionCount / actionElements.length : 1;
+  const visibleBusinessRatio = visibleBusinessCount / total;
+  const visibleInteractiveRatio = interactiveElements.length
+    ? visibleInteractiveCount / interactiveElements.length
+    : visibleBusinessRatio;
+  const stableLocatorRatio = Math.min(
+    1,
+    (testAttributeCount + uniqueIdCount + uniqueNameCount + stableAriaLabelCount) / total
+  );
 
-  let score = 70;
-  score += Math.min(14, Math.round((testAttributeCount / total) * 30));
-  score += Math.min(10, Math.round((uniqueIdCount / total) * 25));
-  score += Math.min(6, Math.round((uniqueNameCount / total) * 15));
-  score += Math.min(8, Math.round((visibleCount / total) * 8));
-  score -= Math.min(18, (warningCountByType.get("Duplicate CSS selector") || 0) * 3);
-  score -= Math.min(14, (warningCountByType.get("Duplicate XPath") || 0) * 3);
-  score -= Math.min(14, (warningCountByType.get("Duplicate text locator") || 0) * 2);
-  score -= Math.min(16, (warningCountByType.get("Non-unique ID") || 0) * 4);
-  score -= Math.min(14, (warningCountByType.get("Dynamic locator detected") || 0) * 2);
-  score -= Math.min(10, hiddenElementCount);
-  score -= Math.min(12, longXPathCount * 2);
-  score -= Math.min(10, cssFallbackCount + xpathFallbackCount * 2);
-  score -= iframeCount > 2 ? Math.min(12, (iframeCount - 2) * 4) : 0;
-  score = clamp(Math.round(score), 0, 100);
+  const businessElementScore = clamp(
+    Math.round(45 + visibleBusinessRatio * 25 + formLabelRatio * 15 + actionNameRatio * 15 - hiddenInteractiveCount * 4),
+    0,
+    100
+  );
+  const locatorQualityScore = clamp(
+    Math.round(
+      50 +
+        stableLocatorRatio * 35 +
+        Math.min(10, (testAttributeCount / total) * 20) -
+        Math.min(24, highIssueCount * 7) -
+        Math.min(16, mediumIssueCount * 3) -
+        Math.min(14, dynamicInteractiveCount * 4) -
+        Math.min(12, longXPathCount * 5) -
+        Math.min(10, cssFallbackCount + xpathFallbackCount * 2)
+    ),
+    0,
+    100
+  );
+  const interactionReadinessScore = clamp(
+    Math.round(
+      55 +
+        visibleInteractiveRatio * 25 +
+        actionNameRatio * 10 +
+        formLabelRatio * 10 -
+        Math.min(18, hiddenInteractiveCount * 6) -
+        Math.min(16, missingAccessibleNameCount * 5) -
+        (iframeCount ? Math.min(10, iframeCount * 3) : 0)
+    ),
+    0,
+    100
+  );
+  const score = clamp(
+    Math.round(businessElementScore * 0.35 + locatorQualityScore * 0.4 + interactionReadinessScore * 0.25),
+    0,
+    100
+  );
 
   const strengths = [];
   const weaknesses = [];
+  const recommendations = [];
 
   if (testAttributeCount) {
     strengths.push("Stable test attributes detected");
@@ -1614,45 +2519,66 @@ function calculateAutomationReadiness(elements, warnings, metrics) {
   if (uniqueNameCount) {
     strengths.push("Unique names detected");
   }
+  if (stableAriaLabelCount) {
+    strengths.push("Stable aria-label locators detected");
+  }
   if (hasStableFormLocators(elements)) {
     strengths.push("Stable form locators available");
   }
-  if (visibleCount / total >= 0.85) {
-    strengths.push("Most automation model elements are visible");
+  if (visibleInteractiveRatio >= 0.85) {
+    strengths.push("Most interactive business elements are visible");
+  }
+  if (actionNameRatio >= 0.85) {
+    strengths.push("Buttons and links generally have accessible names");
   }
 
-  if (warningCountByType.get("Duplicate CSS selector")) {
-    weaknesses.push("Several duplicate CSS selectors found");
+  if (hasIssueType(warnings, "Duplicate CSS selector", "high")) {
+    weaknesses.push("Duplicate CSS locators affect interactive business elements");
+    recommendations.push("Add data-testid to repeated action buttons.");
   }
-  if (warningCountByType.get("Duplicate XPath")) {
-    weaknesses.push("Several duplicate XPath locators found");
+  if (hasIssueType(warnings, "Duplicate XPath")) {
+    weaknesses.push("Duplicate XPath locators found");
   }
-  if (warningCountByType.get("Duplicate text locator")) {
-    weaknesses.push("Repeated text locators may be ambiguous");
+  if (hasIssueType(warnings, "Duplicate text locator", "high")) {
+    weaknesses.push("Repeated action text may be ambiguous");
+    recommendations.push("Use a parent container or data-testid to disambiguate repeated buttons.");
   }
-  if (warningCountByType.get("Non-unique ID")) {
-    weaknesses.push("Non-unique IDs detected");
+  if (hasIssueType(warnings, "Non-unique ID", "high")) {
+    weaknesses.push("Non-unique IDs affect business elements");
   }
-  if (warningCountByType.get("Dynamic locator detected")) {
-    weaknesses.push("Dynamic locators detected");
+  if (dynamicInteractiveCount) {
+    weaknesses.push("Dynamic locators detected on interactive elements");
   }
-  if (hiddenElementCount) {
-    weaknesses.push("Hidden elements detected");
+  if (hiddenInteractiveCount) {
+    weaknesses.push("Hidden interactive elements detected");
   }
   if (longXPathCount) {
-    weaknesses.push("Long XPath locators required for some elements");
+    weaknesses.push("Long XPath locators required for business elements");
+    recommendations.push("Avoid using long XPath as primary locator.");
   }
-  if (iframeCount > 2) {
-    weaknesses.push("Multiple iframe dependencies detected");
+  if (iframeCount) {
+    weaknesses.push("Iframe dependency detected");
   }
-  if (!testAttributeCount && !uniqueIdCount && !uniqueNameCount) {
-    weaknesses.push("Few stable attributes found");
+  if (missingAccessibleNameCount) {
+    weaknesses.push("Some button/link targets are missing accessible names");
+    recommendations.push("Provide aria-label for icon-only buttons.");
+  }
+  if (!testAttributeCount && !uniqueIdCount && !uniqueNameCount && !stableAriaLabelCount) {
+    weaknesses.push("Few stable attributes found on business elements");
+    recommendations.push("Add data-testid to repeated action buttons.");
+  }
+  if (elements.some((element) => /inside an interactive parent/i.test(element.targetingReason || ""))) {
+    recommendations.push("Use parent button as locator instead of SVG child.");
   }
 
   return {
     score,
+    businessElementScore,
+    locatorQualityScore,
+    interactionReadinessScore,
     strengths: strengths.length ? strengths : ["No major locator collisions detected"],
-    weaknesses
+    weaknesses,
+    recommendations: uniqueMessages(recommendations)
   };
 }
 
@@ -1663,6 +2589,64 @@ function hasTestAttributeSnapshot(element) {
     const bestLocator = element.bestLocator || "";
     return locatorType === attribute || css.includes(`[${attribute}=`) || bestLocator.includes(`[${attribute}=`);
   });
+}
+
+function hasStableAriaLabelSnapshot(element) {
+  const ariaLabel = normalizeText(element.ariaLabel);
+  return Boolean(
+    ariaLabel &&
+      element.locatorType === "aria-label" &&
+      ariaLabel.length <= 80 &&
+      !looksDynamicValue(ariaLabel)
+  );
+}
+
+function hasFormControlLabelSnapshot(element) {
+  if (element.elementCategory !== "formControl") {
+    return false;
+  }
+
+  return Boolean(normalizeText(element.labelText || element.ariaLabel || element.placeholder || element.text));
+}
+
+function hasAccessibleNameSnapshot(element) {
+  return Boolean(
+    normalizeText(
+      element.text ||
+        element.ariaLabel ||
+        element.labelText ||
+        element.placeholder ||
+        element.visualTarget?.ariaLabel ||
+        element.visualTarget?.alt ||
+        element.visualTarget?.title
+    )
+  );
+}
+
+function isMissingAccessibleNameSnapshot(element) {
+  return (
+    element.isVisible &&
+    ["button", "link"].includes(element.elementCategory) &&
+    !hasAccessibleNameSnapshot(element)
+  );
+}
+
+function isHiddenLowImpactSnapshot(element) {
+  return (
+    !element.isVisible &&
+    ["footer", "navigation", "header"].includes(element.domContext || "") &&
+    ["link", "navigation"].includes(element.elementCategory || "")
+  );
+}
+
+function hasIssueType(warnings, type, severity) {
+  return warnings.some(
+    (warning) => warning.type === type && (!severity || warning.severity === severity)
+  );
+}
+
+function uniqueMessages(messages) {
+  return Array.from(new Set(messages.filter(Boolean)));
 }
 
 function countUniqueValues(elements, key) {
@@ -1682,7 +2666,7 @@ function countUniqueValues(elements, key) {
 function hasStableFormLocators(elements) {
   return elements.some(
     (element) =>
-      ["input", "select", "textarea", "button"].includes(element.tag) &&
+      ["formControl", "button"].includes(element.elementCategory) &&
       ["data-testid", "data-cy", "data-test", "id", "name"].includes(element.locatorType)
   );
 }
@@ -1700,6 +2684,7 @@ function generateElementName(element, text) {
     element?.getAttribute("alt"),
     element?.getAttribute("title"),
     text,
+    getEmbeddedVisualLabel(element),
     element?.getAttribute("name"),
     element?.id,
     `${getElementType(element)} ${element?.tagName?.toLowerCase() || "element"}`
@@ -1982,11 +2967,20 @@ function getElementText(element) {
     return normalizeText(element.getAttribute("alt"));
   }
 
+  if (["svg", "i"].includes(tag) || isSpanIconElement(element)) {
+    return getVisualTargetAccessibleName(element);
+  }
+
   if (tag === "iframe") {
     return normalizeText(element.getAttribute("title"));
   }
 
-  return normalizeText(element?.innerText || element?.textContent);
+  const visibleText = normalizeText(element?.innerText || element?.textContent);
+  if (visibleText) {
+    return visibleText;
+  }
+
+  return isInteractiveAutomationElement(element) ? getEmbeddedVisualLabel(element) : "";
 }
 
 function getRole(element) {
