@@ -29,6 +29,7 @@ const SCANNED_ELEMENT_SELECTOR = [
 const DYNAMIC_UI_SELECTOR = [
   "dialog",
   '[role="dialog"]',
+  '[role="alertdialog"]',
   '[aria-modal="true"]',
   '[role="alert"]',
   '[role="status"]',
@@ -47,12 +48,19 @@ const DYNAMIC_UI_SELECTOR = [
   '[aria-selected="true"]',
   '[class*="modal" i]',
   '[class*="dialog" i]',
+  '[class*="popup" i]',
+  '[class*="overlay" i]',
   '[class*="toast" i]',
   '[class*="snackbar" i]',
   '[class*="dropdown" i]',
   '[class*="popover" i]',
   '[class*="tooltip" i]',
   '[class*="drawer" i]',
+  '[id*="modal" i]',
+  '[id*="dialog" i]',
+  '[id*="popup" i]',
+  '[id*="overlay" i]',
+  '[id*="drawer" i]',
   '[class*="datepicker" i]',
   '[class*="date-picker" i]',
   '[class*="calendar" i]',
@@ -64,6 +72,23 @@ const DYNAMIC_UI_SELECTOR = [
 ].join(",");
 
 const CAPTURE_ELEMENT_SELECTOR = `${SCANNED_ELEMENT_SELECTOR},${DYNAMIC_UI_SELECTOR}`;
+const MODAL_CANDIDATE_SELECTOR = [
+  "dialog",
+  '[role="dialog"]',
+  '[role="alertdialog"]',
+  '[aria-modal="true"]',
+  "[popover]",
+  '[class*="modal" i]',
+  '[class*="dialog" i]',
+  '[class*="popup" i]',
+  '[class*="overlay" i]',
+  '[class*="drawer" i]',
+  '[id*="modal" i]',
+  '[id*="dialog" i]',
+  '[id*="popup" i]',
+  '[id*="overlay" i]',
+  '[id*="drawer" i]'
+].join(",");
 const VISUAL_TARGET_SELECTOR = [
   "svg",
   "path",
@@ -91,11 +116,14 @@ const TEST_ID_ATTRIBUTES = ["data-testid", "data-cy", "data-test"];
 const VISIBILITY_ATTRIBUTES = [
   "class",
   "style",
+  "disabled",
   "hidden",
   "aria-hidden",
+  "aria-disabled",
   "aria-expanded",
   "open",
-  "role"
+  "role",
+  "inert"
 ];
 const WARNING_TYPES = [
   "Duplicate data-testid",
@@ -105,13 +133,31 @@ const WARNING_TYPES = [
   "Duplicate XPath",
   "Duplicate text locator",
   "Non-unique ID",
-  "Dynamic locator detected"
+  "Dynamic locator detected",
+  "Hidden modal detected",
+  "Low-value interaction",
+  "Assertion candidate limit reached"
 ];
 const MAX_SNAPSHOTS = 100;
 const MAX_SNAPSHOT_ELEMENTS = 30;
 const INTERACTION_CORRELATION_MS = 500;
 const MAX_USER_FLOWS = 100;
 const MAX_RECORDED_ACTIONS = 200;
+const DEFAULT_ASSERTION_EXPORT_LIMITS = {
+  maxAssertionCandidates: 100,
+  maxAssertionCandidatesPerFlow: 5,
+  maxAssertionTextLength: 160,
+  skipDuplicateAssertionText: true,
+  skipHiddenAssertionText: true
+};
+const ASSERTION_SOURCE_PRIORITY = {
+  interactionResult: 5,
+  changedNode: 4,
+  snapshot: 3,
+  interactionAction: 2,
+  selectedElement: 1
+};
+const ASSERTION_CANDIDATE_LIMIT_WARNING = "Assertion candidate limit reached";
 const TRACKED_KEYBOARD_KEYS = ["Enter", "Escape", "Tab"];
 const PRODUCT_NAME = "AI Test Automation Generator";
 const PRODUCT_DESCRIPTION =
@@ -149,6 +195,8 @@ let recordedActions = [];
 let userFlows = [];
 let pendingInteraction = null;
 let pendingInteractionTimer = null;
+let captureModalStateCache = new WeakMap();
+let interactionModalStateCache = new WeakMap();
 
 function scanDomElements(options = {}) {
   const includeHidden = Boolean(options.includeHidden);
@@ -160,15 +208,32 @@ function scanDomElements(options = {}) {
   const scannedElements = includeHidden
     ? allScannedElements
     : allScannedElements.filter((element) => element.isVisible);
+  const snapshots = normalizeSnapshots(options.snapshots || capturedSnapshots);
+  const normalizedRecordedActions = normalizeRecordedActions(recordedActions);
+  const assertionExportLimits = getAssertionExportLimits(options);
+  const includeAssertionCandidates = shouldIncludeAssertionCandidates(options, {
+    snapshots,
+    userFlows,
+    recordedActions: normalizedRecordedActions
+  });
+  const normalizedUserFlows = normalizeUserFlows(userFlows, {
+    includeAssertionCandidates,
+    assertionExportLimits
+  });
+  const interactionSummary = buildInteractionSummary(normalizedUserFlows);
   const warnings = applyLocatorIssues(scannedElements);
+  addBehaviorWarnings(warnings, allScannedElements, normalizedUserFlows);
+  const assertionExtraction = buildAssertionExport({
+    enabled: includeAssertionCandidates,
+    snapshots,
+    userFlows: normalizedUserFlows,
+    exportLimits: assertionExportLimits
+  });
+  warnings.push(...assertionExtraction.warnings);
   const automationReadiness = calculateAutomationReadiness(scannedElements, warnings, {
     hiddenElementCount,
     totalScannedElements: allScannedElements.length
   });
-  const snapshots = normalizeSnapshots(options.snapshots || capturedSnapshots);
-  const normalizedRecordedActions = normalizeRecordedActions(recordedActions);
-  const normalizedUserFlows = normalizeUserFlows(userFlows);
-  const interactionSummary = buildInteractionSummary(normalizedUserFlows);
   const scanDate = new Date().toISOString();
 
   return {
@@ -187,7 +252,10 @@ function scanDomElements(options = {}) {
     recordedFlowsCount: normalizedUserFlows.length,
     recordedActions: normalizedRecordedActions,
     userFlows: normalizedUserFlows,
-    interactionSummary
+    interactionSummary,
+    exportLimits: assertionExportLimits,
+    assertionCandidates: assertionExtraction.assertionCandidates,
+    assertionExtractionSummary: assertionExtraction.summary
   };
 }
 
@@ -218,7 +286,23 @@ function buildElementSnapshot(element, options = {}) {
   const xpath = isDetached ? "" : generateXPath(target);
   const textLocator = buildTextLocator(role, text);
   const locatorChoice = chooseBestLocator(target, css, xpath, role, text);
-  const isVisible = !isDetached && isElementVisible(target);
+  const visibilityResult = isDetached ? buildDetachedVisibilityResult(target) : isActuallyVisible(target);
+  const interactabilityResult = isDetached
+    ? buildDetachedInteractabilityResult()
+    : isActuallyInteractable(target, visibilityResult);
+  const modalState = buildModalState(target, {
+    visibilityResult,
+    interactabilityResult,
+    detached: isDetached
+  });
+  const isVisible = visibilityResult.isVisible;
+  const isInteractable = modalState.isModalCandidate
+    ? modalState.isInteractable
+    : interactabilityResult.isInteractable;
+  const interactabilityReason =
+    modalState.isModalCandidate && modalState.isInteractable && !interactabilityResult.isInteractable
+      ? modalState.reason
+      : interactabilityResult.interactabilityReason;
   const isInteractive = isInteractiveAutomationElement(target);
   const visualTarget = buildVisualTargetSummary(visualElement);
   const elementCategory = classifyElementCategory(target, {
@@ -253,6 +337,11 @@ function buildElementSnapshot(element, options = {}) {
     confidence: locatorChoice.confidence,
     reason: locatorChoice.reason,
     isVisible,
+    isInteractable,
+    visibilityReason: visibilityResult.visibilityReason,
+    interactabilityReason,
+    visibilityChecks: visibilityResult.visibilityChecks,
+    modalState,
     actualTarget: {},
     visualTarget,
     targetingReason: targetDetails.targetingReason,
@@ -478,7 +567,10 @@ function buildActualTargetSummary(snapshot) {
     bestLocator: snapshot.bestLocator || "",
     locatorType: snapshot.locatorType || "",
     confidence: Number(snapshot.confidence) || 0,
-    isVisible: Boolean(snapshot.isVisible)
+    isVisible: Boolean(snapshot.isVisible),
+    isInteractable: Boolean(snapshot.isInteractable),
+    visibilityReason: snapshot.visibilityReason || "",
+    interactabilityReason: snapshot.interactabilityReason || ""
   };
 }
 
@@ -674,9 +766,13 @@ function getEmbeddedVisualLabel(element) {
 function startCapture(options = {}) {
   stopCaptureObserverOnly();
 
-  captureOptions = { includeHidden: Boolean(options.includeHidden) };
+  captureOptions = {
+    includeHidden: Boolean(options.includeHidden),
+    includeAssertionCandidates: getOptionBoolean(options, "includeAssertionCandidates", false)
+  };
   capturedSnapshots = [];
   captureStartedAt = new Date().toISOString();
+  captureModalStateCache = createPrimedModalStateCache();
   captureObserver = new MutationObserver(recordMutationSnapshots);
   captureObserver.observe(document.documentElement, {
     attributes: true,
@@ -695,14 +791,24 @@ function startCapture(options = {}) {
 
 function stopCapture(options = {}) {
   stopCaptureObserverOnly();
-  captureOptions = { includeHidden: Boolean(options.includeHidden) };
+  captureOptions = {
+    includeHidden: Boolean(options.includeHidden),
+    includeAssertionCandidates: getOptionBoolean(
+      options,
+      "includeAssertionCandidates",
+      Boolean(captureOptions.includeAssertionCandidates)
+    )
+  };
 
   return {
     active: false,
     startedAt: captureStartedAt,
     totalSnapshots: capturedSnapshots.length,
     snapshots: normalizeSnapshots(capturedSnapshots),
-    scan: scanDomElements({ includeHidden: captureOptions.includeHidden })
+    scan: scanDomElements({
+      includeHidden: captureOptions.includeHidden,
+      includeAssertionCandidates: captureOptions.includeAssertionCandidates
+    })
   };
 }
 
@@ -722,9 +828,13 @@ function getCaptureStatus() {
 }
 
 function startInteractionRecording(options = {}) {
-  interactionOptions = { includeHidden: Boolean(options.includeHidden) };
+  interactionOptions = {
+    includeHidden: Boolean(options.includeHidden),
+    includeAssertionCandidates: getOptionBoolean(options, "includeAssertionCandidates", true)
+  };
   interactionRecordingActive = true;
   interactionStartedAt = new Date().toISOString();
+  interactionModalStateCache = createPrimedModalStateCache();
   clearPendingInteraction();
   removeInteractionEventListeners();
   addInteractionEventListeners();
@@ -743,7 +853,14 @@ function startInteractionRecording(options = {}) {
 }
 
 function stopInteractionRecording(options = {}) {
-  interactionOptions = { includeHidden: Boolean(options.includeHidden) };
+  interactionOptions = {
+    includeHidden: Boolean(options.includeHidden),
+    includeAssertionCandidates: getOptionBoolean(
+      options,
+      "includeAssertionCandidates",
+      Boolean(interactionOptions.includeAssertionCandidates)
+    )
+  };
   flushPendingInteraction();
   interactionRecordingActive = false;
   removeInteractionEventListeners();
@@ -751,19 +868,32 @@ function stopInteractionRecording(options = {}) {
 
   return {
     ...getInteractionStatus(),
-    scan: scanDomElements({ includeHidden: interactionOptions.includeHidden })
+    scan: scanDomElements({
+      includeHidden: interactionOptions.includeHidden,
+      includeAssertionCandidates: interactionOptions.includeAssertionCandidates
+    })
   };
 }
 
 function clearInteractionHistory(options = {}) {
-  interactionOptions = { includeHidden: Boolean(options.includeHidden) };
+  interactionOptions = {
+    includeHidden: Boolean(options.includeHidden),
+    includeAssertionCandidates: getOptionBoolean(
+      options,
+      "includeAssertionCandidates",
+      Boolean(interactionOptions.includeAssertionCandidates)
+    )
+  };
   clearPendingInteraction();
   recordedActions = [];
   userFlows = [];
 
   return {
     ...getInteractionStatus(),
-    scan: scanDomElements({ includeHidden: interactionOptions.includeHidden })
+    scan: scanDomElements({
+      includeHidden: interactionOptions.includeHidden,
+      includeAssertionCandidates: interactionOptions.includeAssertionCandidates
+    })
   };
 }
 
@@ -959,10 +1089,12 @@ function recordInteractionMutations(mutations) {
     return;
   }
 
+  const mutationEntries = [];
   for (const mutation of mutations) {
-    const entries = extractMutationEntries(mutation);
-    pendingInteraction.mutationEntries.push(...entries);
+    mutationEntries.push(...extractMutationEntries(mutation, { modalStateCache: interactionModalStateCache }));
   }
+  mutationEntries.push(...collectModalTransitionEntries(interactionModalStateCache));
+  pendingInteraction.mutationEntries.push(...mutationEntries);
 }
 
 function schedulePendingInteractionFlush() {
@@ -1000,8 +1132,9 @@ function clearPendingInteraction() {
   pendingInteraction = null;
 }
 
-function extractMutationEntries(mutation) {
+function extractMutationEntries(mutation, options = {}) {
   const entries = [];
+  const modalStateCache = options.modalStateCache || interactionModalStateCache;
 
   if (mutation.type === "childList") {
     for (const node of Array.from(mutation.addedNodes)) {
@@ -1009,7 +1142,10 @@ function extractMutationEntries(mutation) {
         continue;
       }
       for (const target of getMeaningfulCaptureTargets(node)) {
-        entries.push({ element: target, baseChangeType: "added node", detached: false });
+        const entry = buildMutationEntry(target, "added node", false, "", modalStateCache);
+        if (entry) {
+          entries.push(entry);
+        }
       }
     }
 
@@ -1018,7 +1154,10 @@ function extractMutationEntries(mutation) {
         continue;
       }
       for (const target of getMeaningfulCaptureTargets(node)) {
-        entries.push({ element: target, baseChangeType: "removed node", detached: true });
+        const entry = buildMutationEntry(target, "removed node", true, "", modalStateCache);
+        if (entry) {
+          entries.push(entry);
+        }
       }
     }
   }
@@ -1031,16 +1170,47 @@ function extractMutationEntries(mutation) {
       isMeaningfulCaptureTarget(element) &&
       (mutation.oldValue || "") !== (element.getAttribute(mutation.attributeName) || "")
     ) {
-      entries.push({
+      const entry = buildMutationEntry(
         element,
-        baseChangeType: "visibility change",
-        detached: false,
-        attributeName: mutation.attributeName
-      });
+        "visibility change",
+        false,
+        mutation.attributeName,
+        modalStateCache
+      );
+      if (entry) {
+        entries.push(entry);
+      }
     }
   }
 
   return entries;
+}
+
+function buildMutationEntry(element, baseChangeType, detached, attributeName, modalStateCache) {
+  const isKnownModal =
+    getModalCandidateInfo(element).isModalCandidate || Boolean(modalStateCache?.has?.(element));
+  if (isKnownModal) {
+    const transition = buildModalTransition(element, baseChangeType, detached, modalStateCache);
+    if (!transition.type) {
+      return null;
+    }
+    return {
+      element,
+      baseChangeType,
+      detached,
+      attributeName,
+      modalTransition: transition.type,
+      modalTransitionDetails: transition,
+      modalState: transition.currentState
+    };
+  }
+
+  return {
+    element,
+    baseChangeType,
+    detached,
+    attributeName
+  };
 }
 
 function buildUserFlow(interaction) {
@@ -1059,6 +1229,8 @@ function buildUserFlow(interaction) {
     elementCategory: interaction.action.triggerElement.elementCategory || "unknown",
     targetingReason: interaction.action.triggerElement.targetingReason || "",
     text: interaction.action.triggerElement.text,
+    isVisible: interaction.action.triggerElement.isVisible,
+    isInteractable: interaction.action.triggerElement.isInteractable,
     value: interaction.action.value,
     key: interaction.action.key
   };
@@ -1075,9 +1247,11 @@ function buildUserFlow(interaction) {
     action,
     result,
     capturedElements,
+    assertionCandidates: [],
     gherkinSuggestion: buildGherkinSuggestion(action, result)
   };
 
+  flow.assertionCandidates = buildFlowAssertionCandidates(flow, DEFAULT_ASSERTION_EXPORT_LIMITS);
   flow.summarySteps = buildFlowSummarySteps(flow);
   return flow;
 }
@@ -1102,27 +1276,68 @@ function classifyInteractionResult(action, mutationEntries, capturedElements, sy
   const selected = [...candidates, ...syntheticCandidates].sort((left, right) => right.priority - left.priority)[0];
 
   if (!selected) {
+    if (isLowValueInteractionAction(action)) {
+      return {
+        type: "lowValueInteraction",
+        interactionType: "low-value interaction",
+        name: "",
+        title: "",
+        description: "No meaningful visible UI change detected within 500ms",
+        isVisible: false,
+        isInteractable: false,
+        visibilityReason: "",
+        interactabilityReason: "",
+        modalState: {},
+        capturedElements
+      };
+    }
+
     return {
       type: "none",
       interactionType: "no visible UI change",
       name: "",
       title: "",
       description: "No visible UI change detected within 500ms",
+      isVisible: false,
+      isInteractable: false,
+      visibilityReason: "",
+      interactabilityReason: "",
+      modalState: {},
       capturedElements
     };
   }
 
   const title = selected.title || getResultTitle(selected.element, selected.type);
   const name = selected.name || toBusinessIdentifier(title || selected.interactionType, getResultNameSuffix(selected.type));
+  const selectedSnapshot = selected.element instanceof Element ? buildElementSnapshot(selected.element) : {};
+  const modalState = selected.modalState || selectedSnapshot.modalState || {};
+  const isVisible = selected.isVisible ?? Boolean(selectedSnapshot.isVisible);
+  const isInteractable = selected.isInteractable ?? Boolean(selectedSnapshot.isInteractable);
+  const description =
+    selected.description ||
+    (selected.type === "modal" && selected.interactionType === "modal opened"
+      ? "The modal became visible and interactable."
+      : buildResultDescription(selected.interactionType, title));
 
   return {
     type: selected.type,
     interactionType: selected.interactionType,
     name,
     title,
-    description: selected.description || buildResultDescription(selected.interactionType, title),
+    description,
+    bestLocator: selected.bestLocator || selectedSnapshot.bestLocator || selectedSnapshot.css || selectedSnapshot.xpath || "",
+    locatorType: selected.locatorType || selectedSnapshot.locatorType || "",
+    isVisible,
+    isInteractable,
+    visibilityReason: selected.visibilityReason || selectedSnapshot.visibilityReason || "",
+    interactabilityReason: selected.interactabilityReason || selectedSnapshot.interactabilityReason || "",
+    modalState,
     capturedElements
   };
+}
+
+function isLowValueInteractionAction(action) {
+  return ["click", "double click"].includes(action?.actionType || "");
 }
 
 function classifyHighLevelMutation(entry) {
@@ -1137,9 +1352,16 @@ function classifyHighLevelMutation(entry) {
   const removed = entry.detached || entry.baseChangeType === "removed node" || isHiddenMutation(entry);
   const expanded = element.getAttribute("aria-expanded") === "true" || element.hasAttribute("open");
   const selected = element.getAttribute("aria-selected") === "true";
+  const modalState = entry.modalState || buildModalState(element, { detached: entry.detached });
 
-  if (/(modal|dialog)/i.test(tokens) || role === "dialog" || element.getAttribute("aria-modal") === "true") {
-    return highLevelCandidate(removed ? "modal closed" : "modal opened", "modal", element, removed ? 96 : 100);
+  if (modalState.isModalCandidate) {
+    if (entry.modalTransition === "opened" || (!removed && modalState.isOpen)) {
+      return highLevelCandidate("modal opened", "modal", element, 100, { modalState });
+    }
+    if (entry.modalTransition === "closed" || removed) {
+      return highLevelCandidate("modal closed", "modal", element, 96, { modalState });
+    }
+    return null;
   }
 
   if (/(drawer|side-panel|sidepanel)/i.test(tokens)) {
@@ -1185,13 +1407,23 @@ function classifyHighLevelMutation(entry) {
   return null;
 }
 
-function highLevelCandidate(interactionType, type, element, priority) {
+function highLevelCandidate(interactionType, type, element, priority, options = {}) {
+  const snapshot = element instanceof Element ? buildElementSnapshot(element, { detached: options.detached }) : {};
+  const modalState = options.modalState || snapshot.modalState || {};
+
   return {
     interactionType,
     type,
     element,
     priority,
-    title: getResultTitle(element, type)
+    title: getResultTitle(element, type),
+    bestLocator: snapshot.bestLocator || snapshot.css || snapshot.xpath || "",
+    locatorType: snapshot.locatorType || "",
+    isVisible: Boolean(snapshot.isVisible),
+    isInteractable: Boolean(snapshot.isInteractable),
+    visibilityReason: snapshot.visibilityReason || "",
+    interactabilityReason: snapshot.interactabilityReason || "",
+    modalState
   };
 }
 
@@ -1253,9 +1485,12 @@ function collectInteractionCapturedElements(mutationEntries) {
   const snapshots = [];
 
   for (const entry of mutationEntries) {
+    if (entry.modalState?.isModalCandidate && !entry.modalState.isOpen) {
+      continue;
+    }
     const entrySnapshots = collectSnapshotElements(entry.element, {
       detached: entry.detached,
-      includeHidden: interactionOptions.includeHidden || entry.detached
+      includeHidden: entry.modalTransition === "opened" ? false : interactionOptions.includeHidden || entry.detached
     });
     snapshots.push(...entrySnapshots);
   }
@@ -1326,19 +1561,36 @@ function normalizeRecordedActions(actions) {
     : [];
 }
 
-function normalizeUserFlows(flows) {
+function normalizeUserFlows(flows, options = {}) {
+  const includeAssertionCandidates = Boolean(options.includeAssertionCandidates);
+  const exportLimits = getAssertionExportLimits(options.assertionExportLimits || {});
+
   return Array.isArray(flows)
-    ? flows.slice(-MAX_USER_FLOWS).map((flow) => ({
-        timestamp: flow.timestamp || "",
-        flowName: flow.flowName || "",
-        interactionType: flow.interactionType || "",
-        trigger: flow.trigger || "",
-        action: flow.action || {},
-        result: flow.result || {},
-        capturedElements: Array.isArray(flow.capturedElements) ? flow.capturedElements : [],
-        gherkinSuggestion: flow.gherkinSuggestion || {},
-        summarySteps: Array.isArray(flow.summarySteps) ? flow.summarySteps : []
-      }))
+    ? flows.slice(-MAX_USER_FLOWS).map((flow, index) => {
+        const normalizedFlow = {
+          timestamp: flow.timestamp || "",
+          flowName: flow.flowName || "",
+          interactionType: flow.interactionType || "",
+          trigger: flow.trigger || "",
+          action: flow.action || {},
+          result: flow.result || {},
+          capturedElements: Array.isArray(flow.capturedElements) ? flow.capturedElements : [],
+          assertionCandidates: [],
+          gherkinSuggestion: flow.gherkinSuggestion || {},
+          summarySteps: Array.isArray(flow.summarySteps) ? flow.summarySteps : []
+        };
+
+        if (includeAssertionCandidates) {
+          normalizedFlow.assertionCandidates = buildFlowAssertionCandidates(normalizedFlow, exportLimits)
+            .slice(0, exportLimits.maxAssertionCandidatesPerFlow)
+            .map((candidate, candidateIndex) => ({
+              ...candidate,
+              id: candidate.id || `flow${index + 1}Assertion${candidateIndex + 1}`
+            }));
+        }
+
+        return normalizedFlow;
+      })
     : [];
 }
 
@@ -1382,6 +1634,12 @@ function buildHumanReadableActionStep(action) {
 }
 
 function buildHumanReadableResult(result) {
+  if (result?.type === "modal" && result.isVisible && result.isInteractable) {
+    return "The modal became visible and interactable.";
+  }
+  if (result?.type === "lowValueInteraction") {
+    return "No meaningful visible UI change was detected.";
+  }
   return buildResultSummaryStep(result);
 }
 
@@ -1419,7 +1677,7 @@ function buildGherkinWhen(action) {
 }
 
 function buildGherkinThen(result) {
-  if (!result || result.type === "none") {
+  if (!result || result.type === "none" || result.type === "lowValueInteraction") {
     return "Then no visible UI change should occur";
   }
 
@@ -1549,6 +1807,12 @@ function buildResultSummaryStep(result) {
   if (!result || result.type === "none") {
     return "No visible UI change detected";
   }
+  if (result.type === "lowValueInteraction") {
+    return "No meaningful visible UI change detected";
+  }
+  if (result.type === "modal" && result.isVisible && result.isInteractable) {
+    return "Modal became visible and interactable";
+  }
 
   const title = result.title || toReadableName(result.name || result.type);
   const typeLabel = getResultDisplayType(result.type);
@@ -1605,10 +1869,577 @@ function buildBusinessElementFromSnapshot(snapshot, options = {}) {
     elementCategory: snapshot.elementCategory || "unknown",
     isInteractive: Boolean(snapshot.isInteractive),
     isVisible: Boolean(snapshot.isVisible),
+    isInteractable: Boolean(snapshot.isInteractable),
+    visibilityReason: snapshot.visibilityReason || "",
+    interactabilityReason: snapshot.interactabilityReason || "",
+    visibilityChecks: snapshot.visibilityChecks || {},
+    modalState: snapshot.modalState || {},
     actualTarget: snapshot.actualTarget || buildActualTargetSummary(snapshot),
     visualTarget: snapshot.visualTarget || buildVisualTargetSummary(null),
     targetingReason: snapshot.targetingReason || ""
   };
+}
+
+function normalizeAssertionText(text, options = {}) {
+  const settings = {
+    caseSensitive: getOptionBoolean(options, "caseSensitive", false),
+    maxLength: getPositiveIntegerOption(options.maxLength, DEFAULT_ASSERTION_EXPORT_LIMITS.maxAssertionTextLength),
+    collapseWhitespace: getOptionBoolean(options, "collapseWhitespace", true)
+  };
+  const rawInput = String(text ?? "");
+  let cleaned = rawInput.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b\u200c\u200d\ufeff]/g, "");
+
+  if (settings.collapseWhitespace) {
+    cleaned = cleaned.replace(/\s+/g, " ");
+  }
+
+  cleaned = cleaned.trim();
+  let wasTruncated = false;
+  if (cleaned.length > settings.maxLength) {
+    cleaned = truncateAssertionText(cleaned, settings.maxLength);
+    wasTruncated = true;
+  }
+
+  return {
+    rawText: cleaned,
+    normalizedText: settings.caseSensitive ? cleaned : cleaned.toLowerCase(),
+    length: cleaned.length,
+    wasTruncated
+  };
+}
+
+function buildAssertionExport(options = {}) {
+  const exportLimits = getAssertionExportLimits(options.exportLimits || {});
+  const summary = createAssertionExtractionSummary(Boolean(options.enabled));
+  const warnings = [];
+
+  if (!summary.enabled) {
+    return {
+      assertionCandidates: [],
+      summary,
+      warnings
+    };
+  }
+
+  const candidates = [];
+  const userFlows = Array.isArray(options.userFlows) ? options.userFlows : [];
+  const snapshots = Array.isArray(options.snapshots) ? options.snapshots : [];
+
+  for (const flow of userFlows) {
+    candidates.push(...buildFlowAssertionCandidates(flow, exportLimits, summary));
+  }
+
+  for (const snapshot of snapshots) {
+    candidates.push(...buildSnapshotAssertionCandidates(snapshot, exportLimits, summary));
+  }
+
+  const assertionCandidates = dedupeAndLimitAssertionCandidates(candidates, exportLimits, summary).map(
+    (candidate, index) => ({
+      ...candidate,
+      id: candidate.id || `assertion${index + 1}`
+    })
+  );
+
+  summary.totalCandidates = assertionCandidates.length;
+  if (summary.limitReached) {
+    warnings.push({
+      type: ASSERTION_CANDIDATE_LIMIT_WARNING,
+      count: 1,
+      severity: "low",
+      affectedCategory: "assertionCandidates",
+      recommendation: "Only the most relevant assertion candidates were exported to keep the JSON compact."
+    });
+  }
+
+  return {
+    assertionCandidates,
+    summary,
+    warnings
+  };
+}
+
+function buildFlowAssertionCandidates(flow, exportLimits = DEFAULT_ASSERTION_EXPORT_LIMITS, summary) {
+  if (!flow) {
+    return [];
+  }
+
+  const limits = getAssertionExportLimits(exportLimits);
+  const candidates = [];
+  const action = flow.action || {};
+  const result = flow.result || {};
+  const capturedElements = Array.isArray(flow.capturedElements) ? flow.capturedElements : [];
+
+  const actionCandidate = buildActionAssertionCandidate(action, limits, summary);
+  if (actionCandidate) {
+    candidates.push(actionCandidate);
+  }
+
+  const resultCandidate = buildResultAssertionCandidate(result, limits, summary);
+  if (resultCandidate) {
+    candidates.push(resultCandidate);
+  }
+
+  for (const element of capturedElements) {
+    const candidate = buildElementAssertionCandidate(element, {
+      source: "changedNode",
+      exportLimits: limits,
+      summary
+    });
+    if (candidate) {
+      candidates.push(candidate);
+    }
+  }
+
+  return dedupeAndLimitAssertionCandidates(candidates, {
+    ...limits,
+    maxAssertionCandidates: limits.maxAssertionCandidatesPerFlow
+  }, summary).map((candidate, index) => ({
+    ...candidate,
+    id: candidate.id || `flowAssertion${index + 1}`
+  }));
+}
+
+function buildSnapshotAssertionCandidates(snapshot, exportLimits, summary) {
+  if (!snapshot || !Array.isArray(snapshot.elements)) {
+    return [];
+  }
+
+  const limits = getAssertionExportLimits(exportLimits);
+  const candidates = [];
+  const source = isChangedSnapshot(snapshot) ? "changedNode" : "snapshot";
+
+  for (const element of snapshot.elements.slice(0, MAX_SNAPSHOT_ELEMENTS)) {
+    const candidate = buildElementAssertionCandidate(element, {
+      source,
+      exportLimits: limits,
+      summary,
+      snapshot
+    });
+    if (candidate) {
+      candidates.push(candidate);
+    }
+  }
+
+  return candidates;
+}
+
+function buildActionAssertionCandidate(action, exportLimits, summary) {
+  const type = getActionAssertionType(action);
+  if (!type) {
+    return null;
+  }
+
+  return createAssertionCandidate({
+    type,
+    text: getActionAssertionText(action),
+    source: "interactionAction",
+    relatedElementName: action.elementName || "",
+    bestLocator: action.bestLocator || action.locator || "",
+    confidence: 0.74,
+    isVisible: action.isVisible !== false,
+    exportLimits,
+    summary
+  });
+}
+
+function buildResultAssertionCandidate(result, exportLimits, summary) {
+  const type = getResultAssertionType(result);
+  if (!type) {
+    return null;
+  }
+
+  return createAssertionCandidate({
+    type,
+    text: getResultAssertionText(result),
+    source: "interactionResult",
+    relatedElementName: result.name || result.title || "",
+    bestLocator: result.bestLocator || "",
+    confidence: getAssertionConfidence(type, "interactionResult"),
+    isVisible: result.isVisible !== false,
+    exportLimits,
+    summary
+  });
+}
+
+function buildElementAssertionCandidate(element, options = {}) {
+  if (!isAssertionRelevantElement(element)) {
+    return null;
+  }
+
+  const type = getElementAssertionType(element, options.snapshot);
+  if (!type) {
+    return null;
+  }
+
+  return createAssertionCandidate({
+    type,
+    text: getElementAssertionText(element, type),
+    source: options.source || "selectedElement",
+    relatedElementName: element.name || element.elementName || "",
+    bestLocator: element.bestLocator || element.locator || element.css || element.xpath || "",
+    confidence: getAssertionConfidence(type, options.source || "selectedElement"),
+    isVisible: element.isVisible !== false,
+    exportLimits: options.exportLimits,
+    summary: options.summary
+  });
+}
+
+function createAssertionCandidate(options = {}) {
+  const exportLimits = getAssertionExportLimits(options.exportLimits || {});
+  const summary = options.summary || null;
+
+  if (exportLimits.skipHiddenAssertionText && options.isVisible === false) {
+    if (summary) {
+      summary.hiddenTextSkipped += 1;
+    }
+    return null;
+  }
+
+  const normalized = normalizeAssertionText(options.text, {
+    maxLength: exportLimits.maxAssertionTextLength
+  });
+
+  if (!normalized.normalizedText || isLowValueAssertionText(normalized.normalizedText)) {
+    return null;
+  }
+
+  if (normalized.wasTruncated && summary) {
+    summary.longTextTruncated += 1;
+  }
+
+  return {
+    id: options.id || "",
+    type: options.type || "interactionResultText",
+    text: normalized.rawText,
+    normalizedText: normalized.normalizedText,
+    recommendedAssertion: getRecommendedAssertion(options.type, normalized),
+    confidence: Number(options.confidence) || getAssertionConfidence(options.type, options.source),
+    source: options.source || "selectedElement",
+    relatedElementName: normalizeText(options.relatedElementName || ""),
+    bestLocator: options.bestLocator || ""
+  };
+}
+
+function dedupeAndLimitAssertionCandidates(candidates, exportLimits, summary) {
+  const limits = getAssertionExportLimits(exportLimits || {});
+  const normalizedCandidates = candidates.filter(Boolean);
+  if (!limits.skipDuplicateAssertionText) {
+    const sorted = normalizedCandidates.sort(compareAssertionCandidatesForExport);
+    if (sorted.length > limits.maxAssertionCandidates) {
+      if (summary) {
+        summary.limitReached = true;
+      }
+      return sorted.slice(0, limits.maxAssertionCandidates);
+    }
+    return sorted;
+  }
+
+  const byTextAndType = new Map();
+
+  for (const candidate of normalizedCandidates) {
+    const key = `${candidate.normalizedText}|${candidate.type}`;
+    const existing = byTextAndType.get(key);
+
+    if (!existing) {
+      byTextAndType.set(key, candidate);
+      continue;
+    }
+
+    if (summary) {
+      summary.duplicatesSkipped += 1;
+    }
+
+    if (compareAssertionCandidatePriority(candidate, existing) > 0) {
+      byTextAndType.set(key, candidate);
+    }
+  }
+
+  const deduped = Array.from(byTextAndType.values()).sort(compareAssertionCandidatesForExport);
+  if (deduped.length > limits.maxAssertionCandidates) {
+    if (summary) {
+      summary.limitReached = true;
+    }
+    return deduped.slice(0, limits.maxAssertionCandidates);
+  }
+
+  return deduped;
+}
+
+function getActionAssertionType(action) {
+  const category = action?.elementCategory || action?.actualTarget?.elementCategory || "";
+  const role = action?.actualTarget?.role || action?.role || "";
+  const tag = action?.actualTarget?.tag || action?.tag || "";
+
+  if (category === "button" || role === "button" || tag === "button") {
+    return "buttonText";
+  }
+  if (category === "link" || role === "link" || tag === "a") {
+    return "linkText";
+  }
+  if (category === "formControl" || ["textbox", "combobox", "checkbox", "radio"].includes(role)) {
+    return "inputLabel";
+  }
+
+  return "";
+}
+
+function getActionAssertionText(action) {
+  return normalizeText(action?.text || toReadableName(action?.elementName || "") || action?.value || "");
+}
+
+function getResultAssertionType(result) {
+  if (!result || result.type === "none" || result.type === "lowValueInteraction") {
+    return "";
+  }
+
+  if (result.type === "modal" || /modal|dialog/i.test(`${result.interactionType || ""} ${result.name || ""}`)) {
+    return "modalTitle";
+  }
+  if (result.type === "toast") {
+    return getMessageAssertionType(result.title || result.description || result.name, "toastMessage");
+  }
+  if (result.type === "validationMessage") {
+    return "validationMessage";
+  }
+  if (/error|invalid|failed|failure/i.test(`${result.type || ""} ${result.interactionType || ""} ${result.title || ""}`)) {
+    return "errorMessage";
+  }
+  if (/success|saved|created|updated|complete|completed/i.test(`${result.type || ""} ${result.interactionType || ""} ${result.title || ""}`)) {
+    return "successMessage";
+  }
+
+  return result.title || result.description ? "interactionResultText" : "";
+}
+
+function getResultAssertionText(result) {
+  return result?.title || result?.description || toReadableName(result?.name || "");
+}
+
+function isAssertionRelevantElement(element) {
+  if (!element || element.elementCategory === "decorativeMedia" || element.isVisible === false) {
+    return false;
+  }
+
+  if (isLowImpactRepeatedNavigationElement(element)) {
+    return false;
+  }
+
+  if (["footer", "navigation"].includes(element.domContext || "") && !element.isInteractive) {
+    return false;
+  }
+
+  return true;
+}
+
+function getElementAssertionType(element, snapshot) {
+  const category = element?.elementCategory || "";
+  const role = element?.role || "";
+  const tokens = `${element?.name || ""} ${element?.text || ""} ${element?.className || ""} ${element?.id || ""}`.toLowerCase();
+
+  if ((category === "modal" || category === "dialog" || role === "dialog" || element?.modalState?.isModalCandidate) && element?.modalState?.isOpen !== false) {
+    return "modalTitle";
+  }
+  if (category === "toast" || ["alert", "status"].includes(role)) {
+    return getMessageAssertionType(element.text || element.name, "toastMessage");
+  }
+  if (category === "validationMessage" || /validation|invalid|field-error/.test(tokens)) {
+    return "validationMessage";
+  }
+  if (/error|failed|failure/.test(tokens)) {
+    return "errorMessage";
+  }
+  if (/success|saved|created|updated|complete|completed/.test(tokens)) {
+    return "successMessage";
+  }
+  if (category === "button" && element.isInteractive && snapshot?.changeType) {
+    return "buttonText";
+  }
+  if (category === "link" && element.isInteractive && snapshot?.changeType) {
+    return "linkText";
+  }
+
+  if (snapshot && isChangedSnapshot(snapshot) && element.text && element.text.length <= DEFAULT_ASSERTION_EXPORT_LIMITS.maxAssertionTextLength) {
+    return "changedText";
+  }
+
+  return "";
+}
+
+function getElementAssertionText(element, type) {
+  if (type === "modalTitle") {
+    return element.elementName || element.name || element.text || "";
+  }
+
+  return element.text || element.elementName || element.name || "";
+}
+
+function getMessageAssertionType(text, fallbackType) {
+  const value = String(text || "");
+  if (/success|saved|created|updated|complete|completed/i.test(value)) {
+    return "successMessage";
+  }
+  if (/error|invalid|failed|failure|required|missing/i.test(value)) {
+    return fallbackType === "toastMessage" ? "errorMessage" : "validationMessage";
+  }
+  return fallbackType;
+}
+
+function getRecommendedAssertion(type, normalizedText) {
+  if (!normalizedText?.normalizedText) {
+    return "notRecommended";
+  }
+  if (normalizedText.wasTruncated || normalizedText.length > 100) {
+    return "contains";
+  }
+
+  if (type === "modalTitle") {
+    return "visibleText";
+  }
+  if (["toastMessage", "successMessage", "errorMessage", "validationMessage", "interactionResultText", "changedText"].includes(type)) {
+    return "contains";
+  }
+  if (["buttonText", "linkText", "inputLabel", "pageHeading"].includes(type)) {
+    return "visibleText";
+  }
+
+  return "contains";
+}
+
+function getAssertionConfidence(type, source) {
+  const sourceBoost = {
+    interactionResult: 0.08,
+    changedNode: 0.04,
+    snapshot: 0.02,
+    interactionAction: 0,
+    selectedElement: -0.05
+  }[source] || 0;
+  const base = {
+    modalTitle: 0.88,
+    toastMessage: 0.84,
+    validationMessage: 0.86,
+    errorMessage: 0.84,
+    successMessage: 0.84,
+    buttonText: 0.78,
+    linkText: 0.76,
+    inputLabel: 0.76,
+    changedText: 0.7,
+    interactionResultText: 0.72,
+    pageHeading: 0.68
+  }[type] || 0.65;
+
+  return clamp(Number((base + sourceBoost).toFixed(2)), 0, 0.98);
+}
+
+function compareAssertionCandidatePriority(candidate, existing) {
+  const sourcePriority =
+    (ASSERTION_SOURCE_PRIORITY[candidate.source] || 0) -
+    (ASSERTION_SOURCE_PRIORITY[existing.source] || 0);
+  if (sourcePriority !== 0) {
+    return sourcePriority;
+  }
+
+  return (Number(candidate.confidence) || 0) - (Number(existing.confidence) || 0);
+}
+
+function compareAssertionCandidatesForExport(left, right) {
+  const sourcePriority =
+    (ASSERTION_SOURCE_PRIORITY[right.source] || 0) -
+    (ASSERTION_SOURCE_PRIORITY[left.source] || 0);
+  if (sourcePriority !== 0) {
+    return sourcePriority;
+  }
+
+  return (Number(right.confidence) || 0) - (Number(left.confidence) || 0);
+}
+
+function isChangedSnapshot(snapshot) {
+  const changeType = `${snapshot?.changeType || ""} ${snapshot?.snapshotType || ""}`.toLowerCase();
+  return /changed|visibility change|added node|opened|appeared/.test(changeType);
+}
+
+function isLowValueAssertionText(text) {
+  const normalized = String(text || "").trim().toLowerCase();
+  return (
+    normalized.length < 2 ||
+    ["button", "link", "element", "modal", "dialog", "close", "ok"].includes(normalized) ||
+    /^\d+$/.test(normalized)
+  );
+}
+
+function truncateAssertionText(text, maxLength) {
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  const truncated = text.slice(0, Math.max(0, maxLength - 1)).trimEnd();
+  const lastSpace = truncated.lastIndexOf(" ");
+  if (lastSpace >= Math.floor(maxLength * 0.6)) {
+    return truncated.slice(0, lastSpace).trimEnd();
+  }
+
+  return truncated;
+}
+
+function createAssertionExtractionSummary(enabled) {
+  return {
+    enabled: Boolean(enabled),
+    totalCandidates: 0,
+    duplicatesSkipped: 0,
+    hiddenTextSkipped: 0,
+    longTextTruncated: 0,
+    limitReached: false
+  };
+}
+
+function getAssertionExportLimits(options = {}) {
+  return {
+    maxAssertionCandidates: getPositiveIntegerOption(
+      options.maxAssertionCandidates,
+      DEFAULT_ASSERTION_EXPORT_LIMITS.maxAssertionCandidates
+    ),
+    maxAssertionCandidatesPerFlow: getPositiveIntegerOption(
+      options.maxAssertionCandidatesPerFlow,
+      DEFAULT_ASSERTION_EXPORT_LIMITS.maxAssertionCandidatesPerFlow
+    ),
+    maxAssertionTextLength: getPositiveIntegerOption(
+      options.maxAssertionTextLength,
+      DEFAULT_ASSERTION_EXPORT_LIMITS.maxAssertionTextLength
+    ),
+    skipDuplicateAssertionText: getOptionBoolean(
+      options,
+      "skipDuplicateAssertionText",
+      DEFAULT_ASSERTION_EXPORT_LIMITS.skipDuplicateAssertionText
+    ),
+    skipHiddenAssertionText: getOptionBoolean(
+      options,
+      "skipHiddenAssertionText",
+      DEFAULT_ASSERTION_EXPORT_LIMITS.skipHiddenAssertionText
+    )
+  };
+}
+
+function shouldIncludeAssertionCandidates(options = {}, context = {}) {
+  if (Object.prototype.hasOwnProperty.call(options, "includeAssertionCandidates")) {
+    return Boolean(options.includeAssertionCandidates);
+  }
+
+  return Boolean(
+    (Array.isArray(context.userFlows) && context.userFlows.length) ||
+      (Array.isArray(context.recordedActions) && context.recordedActions.length) ||
+      (Array.isArray(context.snapshots) && context.snapshots.length)
+  );
+}
+
+function getOptionBoolean(options, key, defaultValue) {
+  if (!options || !Object.prototype.hasOwnProperty.call(options, key)) {
+    return Boolean(defaultValue);
+  }
+  return Boolean(options[key]);
+}
+
+function getPositiveIntegerOption(value, defaultValue) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : defaultValue;
 }
 
 function inferBusinessElementSuffix(snapshot) {
@@ -1945,6 +2776,8 @@ function recordMutationSnapshots(mutations) {
       recordAttributeSnapshot(mutation);
     }
   }
+
+  recordModalTransitionSnapshots();
 }
 
 function recordNodeListSnapshots(nodes, baseChangeType, detached) {
@@ -1962,7 +2795,7 @@ function recordNodeListSnapshots(nodes, baseChangeType, detached) {
       if (capturedSnapshots.length >= MAX_SNAPSHOTS) {
         break;
       }
-      addCaptureSnapshot(target, baseChangeType, { detached });
+      addCaptureSnapshot(target, baseChangeType, { detached, modalStateCache: captureModalStateCache });
     }
   }
 }
@@ -1983,7 +2816,10 @@ function recordAttributeSnapshot(mutation) {
     return;
   }
 
-  addCaptureSnapshot(element, "visibility change", { attributeName: mutation.attributeName });
+  addCaptureSnapshot(element, "visibility change", {
+    attributeName: mutation.attributeName,
+    modalStateCache: captureModalStateCache
+  });
 }
 
 function addCaptureSnapshot(element, baseChangeType, options = {}) {
@@ -1992,11 +2828,24 @@ function addCaptureSnapshot(element, baseChangeType, options = {}) {
   }
 
   const detached = Boolean(options.detached);
-  const changeType = classifyChangeType(element, baseChangeType, detached);
-  const elements = collectSnapshotElements(element, {
-    detached,
-    includeHidden: captureOptions.includeHidden || detached
-  });
+  const modalStateCache = options.modalStateCache || captureModalStateCache;
+  const modalTransition =
+    options.modalTransitionDetails ||
+    buildModalTransition(element, baseChangeType, detached, modalStateCache);
+  const modalState = modalTransition.currentState || buildModalState(element, { detached });
+
+  if (modalState.isModalCandidate && !modalTransition.type) {
+    return;
+  }
+
+  const changeType = modalTransition.snapshotType || classifyChangeType(element, baseChangeType, detached);
+  const elements =
+    modalTransition.type === "closed"
+      ? [buildElementSnapshot(element, { detached })]
+      : collectSnapshotElements(element, {
+          detached,
+          includeHidden: modalTransition.type === "opened" ? false : captureOptions.includeHidden || detached
+        });
 
   if (!elements.length || isDuplicateSnapshot(changeType, elements)) {
     return;
@@ -2007,8 +2856,32 @@ function addCaptureSnapshot(element, baseChangeType, options = {}) {
     snapshotName: buildSnapshotName(changeType, primaryElement),
     timestamp: new Date().toISOString(),
     changeType,
+    snapshotType: changeType,
+    elementName: primaryElement.elementName || "",
+    isVisible: Boolean(primaryElement.isVisible),
+    isInteractable: Boolean(primaryElement.isInteractable),
+    modalState: primaryElement.modalState || modalState || {},
+    newElements: modalTransition.type === "closed" ? [] : elements.slice(1),
     elements
   });
+}
+
+function recordModalTransitionSnapshots() {
+  if (capturedSnapshots.length >= MAX_SNAPSHOTS) {
+    return;
+  }
+
+  for (const entry of collectModalTransitionEntries(captureModalStateCache)) {
+    if (capturedSnapshots.length >= MAX_SNAPSHOTS) {
+      break;
+    }
+    addCaptureSnapshot(entry.element, entry.baseChangeType, {
+      detached: entry.detached,
+      attributeName: entry.attributeName,
+      modalStateCache: captureModalStateCache,
+      modalTransitionDetails: entry.modalTransitionDetails
+    });
+  }
 }
 
 function collectSnapshotElements(root, options = {}) {
@@ -2057,6 +2930,10 @@ function isMeaningfulCaptureTarget(element) {
     return false;
   }
 
+  if (getModalCandidateInfo(element).isModalCandidate) {
+    return true;
+  }
+
   if (matchesSelector(element, DYNAMIC_UI_SELECTOR) || matchesSelector(element, SCANNED_ELEMENT_SELECTOR)) {
     return true;
   }
@@ -2098,9 +2975,10 @@ function classifyChangeType(element, baseChangeType, detached) {
   const tokens = getElementTokens(element);
   const visible = !detached && isElementVisible(element);
   const isRemoval = detached || baseChangeType === "removed node" || (baseChangeType === "visibility change" && !visible);
+  const modalState = buildModalState(element, { detached });
 
-  if (/(modal|dialog)/i.test(tokens) || element.getAttribute("role") === "dialog" || element.getAttribute("aria-modal") === "true") {
-    return isRemoval ? "modal removal" : "modal appearance";
+  if (modalState.isModalCandidate) {
+    return isRemoval || !modalState.isOpen ? "Modal Closed" : "Modal Opened";
   }
 
   if (/(dropdown|select-menu|combobox|listbox|menu|popover)/i.test(tokens) || ["menu", "listbox"].includes(element.getAttribute("role"))) {
@@ -2144,6 +3022,12 @@ function normalizeSnapshots(snapshots) {
           snapshotName: snapshot.snapshotName || "",
           timestamp: snapshot.timestamp || "",
           changeType: snapshot.changeType || "",
+          snapshotType: snapshot.snapshotType || snapshot.changeType || "",
+          elementName: snapshot.elementName || "",
+          isVisible: Boolean(snapshot.isVisible),
+          isInteractable: Boolean(snapshot.isInteractable),
+          modalState: snapshot.modalState || {},
+          newElements: Array.isArray(snapshot.newElements) ? snapshot.newElements : [],
           elements: snapshot.elements
         }))
     : [];
@@ -2186,6 +3070,37 @@ function applyLocatorIssues(elements) {
     }
     return ISSUE_SEVERITY_RANK[right.severity] - ISSUE_SEVERITY_RANK[left.severity];
   });
+}
+
+function addBehaviorWarnings(warnings, allElements, flows) {
+  const hiddenModalCount = allElements.filter(
+    (element) =>
+      element.modalState?.isModalCandidate &&
+      !element.modalState.isOpen &&
+      (!element.isVisible || !element.isInteractable)
+  ).length;
+
+  if (hiddenModalCount) {
+    warnings.push({
+      type: "Hidden modal detected",
+      count: hiddenModalCount,
+      severity: "medium",
+      affectedCategory: "modal",
+      recommendation: "Do not generate automation steps from hidden modal content until the modal becomes visible."
+    });
+  }
+
+  const lowValueCount = flows.filter((flow) => flow.result?.type === "lowValueInteraction").length;
+  if (lowValueCount) {
+    warnings.push({
+      type: "Low-value interaction",
+      count: lowValueCount,
+      severity: "low",
+      affectedCategory: "interaction",
+      recommendation:
+        "Ignore interactions that do not produce navigation, visible UI change, form input, modal, dropdown, toast, or validation result."
+    });
+  }
 }
 
 function markDuplicateIssue(elements, key, issueType, warningMap) {
@@ -2811,47 +3726,692 @@ function generateXPath(element) {
   return `/${parts.join("/")}`;
 }
 
-function isElementVisible(element) {
-  if (!element || !element.isConnected) {
-    return false;
+function isActuallyVisible(element) {
+  const checks = createVisibilityChecks();
+
+  if (!(element instanceof Element)) {
+    return buildVisibilityResult(false, "Element does not exist.", checks);
   }
 
-  if (element.closest("[hidden], [aria-hidden='true'], [inert]")) {
-    return false;
+  if (!element.isConnected) {
+    return buildVisibilityResult(false, "Element is not connected to the DOM.", checks);
   }
 
   const style = window.getComputedStyle(element);
-  if (
-    style.display === "none" ||
-    style.visibility === "hidden" ||
-    style.visibility === "collapse" ||
-    Number(style.opacity) === 0
-  ) {
-    return false;
+  checks.display = style.display || "";
+  checks.visibility = style.visibility || "";
+  checks.opacity = style.opacity || "";
+  checks.hiddenAttribute = element.hasAttribute("hidden");
+  checks.ariaHidden = element.getAttribute("aria-hidden") === "true";
+  checks.inert = element.hasAttribute("inert");
+
+  const hiddenInfo = getHiddenElementOrAncestorInfo(element);
+  if (hiddenInfo) {
+    checks.ancestorHidden = hiddenInfo.element !== element;
+    if (hiddenInfo.type === "hiddenAttribute") {
+      checks.hiddenAttribute = hiddenInfo.element === element;
+    }
+    if (hiddenInfo.type === "ariaHidden") {
+      checks.ariaHidden = hiddenInfo.element === element;
+    }
+    return buildVisibilityResult(
+      false,
+      "Element or ancestor is hidden by aria-hidden/display/visibility/opacity.",
+      checks
+    );
   }
 
   if (element instanceof HTMLInputElement && element.type === "hidden") {
-    return false;
-  }
-
-  if (isDisabledForInteraction(element)) {
-    return false;
+    return buildVisibilityResult(false, "Input type hidden is not visible.", checks);
   }
 
   const rects = element.getClientRects();
-  if (!rects.length) {
+  const rect = element.getBoundingClientRect();
+  checks.hasBoundingBox = Boolean(rects.length && rect.width > 0 && rect.height > 0);
+  if (!checks.hasBoundingBox) {
+    return buildVisibilityResult(false, "Element does not have a visible bounding box.", checks);
+  }
+
+  checks.inViewport = isRectInsideViewport(rect);
+  checks.reasonablyVisible = checks.inViewport || isRectReasonablyVisible(element, rect, style);
+  if (!checks.reasonablyVisible) {
+    return buildVisibilityResult(
+      false,
+      "Element is outside the viewport and is not reasonably visible.",
+      checks
+    );
+  }
+
+  return buildVisibilityResult(
+    true,
+    "Element has visible bounding box and visible computed style.",
+    checks
+  );
+}
+
+function isActuallyInteractable(element, visibilityResult) {
+  const checks = createInteractabilityChecks();
+
+  if (!(element instanceof Element)) {
+    return buildInteractabilityResult(false, "Element does not exist.", checks);
+  }
+
+  const visibility = visibilityResult || isActuallyVisible(element);
+  checks.isVisible = Boolean(visibility.isVisible);
+  if (!visibility.isVisible) {
+    return buildInteractabilityResult(false, visibility.visibilityReason || "Element is not visible.", checks);
+  }
+
+  checks.disabled = isDisabledForInteraction(element);
+  checks.ariaDisabled = hasAriaDisabled(element);
+  if (checks.disabled || checks.ariaDisabled) {
+    return buildInteractabilityResult(false, "Element is disabled or aria-disabled.", checks);
+  }
+
+  const style = window.getComputedStyle(element);
+  checks.pointerEvents = style.pointerEvents || "";
+  const pointerBlocker = getPointerEventsBlocker(element);
+  checks.pointerEventsBlocked = Boolean(pointerBlocker);
+  if (pointerBlocker) {
+    return buildInteractabilityResult(false, "Element or ancestor has pointer-events:none.", checks);
+  }
+
+  const coverage = getCenterPointCoverage(element);
+  checks.centerPointChecked = coverage.checked;
+  checks.centerPointCovered = coverage.covered;
+  checks.coveringElement = coverage.coveringElement;
+  if (coverage.covered) {
+    return buildInteractabilityResult(false, "Element center point is covered by another element.", checks);
+  }
+
+  checks.focusable = isFocusableElement(element);
+  checks.clickable = isClickableElement(element);
+  checks.hasBehavior = hasInteractableBehavior(element);
+  if (!checks.focusable && !checks.clickable && !checks.hasBehavior) {
+    return buildInteractabilityResult(
+      false,
+      "Element is visible but does not expose focusable, clickable, or interactive behavior.",
+      checks
+    );
+  }
+
+  return buildInteractabilityResult(
+    true,
+    "Element is visible, enabled, and receives pointer events.",
+    checks
+  );
+}
+
+function buildModalState(element, options = {}) {
+  const candidateInfo = getModalCandidateInfo(element);
+  const visibilityResult = options.visibilityResult || (
+    options.detached ? buildDetachedVisibilityResult(element) : isActuallyVisible(element)
+  );
+  const interactabilityResult = options.interactabilityResult || (
+    options.detached ? buildDetachedInteractabilityResult() : isActuallyInteractable(element, visibilityResult)
+  );
+  const descendantInteractable =
+    candidateInfo.isModalCandidate &&
+    !options.detached &&
+    !interactabilityResult.isInteractable &&
+    hasVisibleInteractableDescendant(element);
+  const isVisible = Boolean(visibilityResult.isVisible);
+  const isInteractable = Boolean(interactabilityResult.isInteractable || descendantInteractable);
+  const isOpen = Boolean(candidateInfo.isModalCandidate && isVisible && isInteractable);
+
+  return {
+    isModalCandidate: Boolean(candidateInfo.isModalCandidate),
+    isOpen,
+    isVisible,
+    isInteractable,
+    reason: getModalStateReason(candidateInfo, visibilityResult, interactabilityResult, descendantInteractable, isOpen),
+    candidateReason: candidateInfo.reason || ""
+  };
+}
+
+function createVisibilityChecks() {
+  return {
+    display: "",
+    visibility: "",
+    opacity: "",
+    hasBoundingBox: false,
+    hiddenAttribute: false,
+    ariaHidden: false,
+    ancestorHidden: false,
+    inert: false,
+    inViewport: false,
+    reasonablyVisible: false
+  };
+}
+
+function createInteractabilityChecks() {
+  return {
+    isVisible: false,
+    disabled: false,
+    ariaDisabled: false,
+    pointerEvents: "",
+    pointerEventsBlocked: false,
+    centerPointChecked: false,
+    centerPointCovered: false,
+    coveringElement: "",
+    focusable: false,
+    clickable: false,
+    hasBehavior: false
+  };
+}
+
+function buildVisibilityResult(isVisible, visibilityReason, visibilityChecks) {
+  return {
+    isVisible: Boolean(isVisible),
+    visibilityReason,
+    visibilityChecks: {
+      ...createVisibilityChecks(),
+      ...(visibilityChecks || {})
+    }
+  };
+}
+
+function buildInteractabilityResult(isInteractable, interactabilityReason, interactabilityChecks) {
+  return {
+    isInteractable: Boolean(isInteractable),
+    interactabilityReason,
+    interactabilityChecks: {
+      ...createInteractabilityChecks(),
+      ...(interactabilityChecks || {})
+    }
+  };
+}
+
+function buildDetachedVisibilityResult(element) {
+  const checks = createVisibilityChecks();
+  if (element instanceof Element) {
+    checks.hiddenAttribute = element.hasAttribute("hidden");
+    checks.ariaHidden = element.getAttribute("aria-hidden") === "true";
+  }
+  return buildVisibilityResult(false, "Element is detached from the DOM.", checks);
+}
+
+function buildDetachedInteractabilityResult() {
+  return buildInteractabilityResult(false, "Element is detached from the DOM.", createInteractabilityChecks());
+}
+
+function isElementVisible(element) {
+  return isActuallyVisible(element).isVisible;
+}
+
+function getHiddenElementOrAncestorInfo(element) {
+  let current = element;
+
+  while (current && current.nodeType === Node.ELEMENT_NODE) {
+    const style = window.getComputedStyle(current);
+
+    if (current.hasAttribute("hidden")) {
+      return { element: current, type: "hiddenAttribute" };
+    }
+    if (current.getAttribute("aria-hidden") === "true") {
+      return { element: current, type: "ariaHidden" };
+    }
+    if (current.hasAttribute("inert")) {
+      return { element: current, type: "inert" };
+    }
+    if (style.display === "none") {
+      return { element: current, type: "display" };
+    }
+    if (style.visibility === "hidden" || style.visibility === "collapse") {
+      return { element: current, type: "visibility" };
+    }
+    if (isZeroOpacity(style.opacity)) {
+      return { element: current, type: "opacity" };
+    }
+
+    current = current.parentElement;
+  }
+
+  return null;
+}
+
+function isZeroOpacity(value) {
+  const opacity = Number.parseFloat(value);
+  return Number.isFinite(opacity) && opacity <= 0;
+}
+
+function isRectInsideViewport(rect) {
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  return rect.bottom > 0 && rect.right > 0 && rect.top < viewportHeight && rect.left < viewportWidth;
+}
+
+function isRectReasonablyVisible(element, rect, style) {
+  const position = style.position || "";
+  if (position === "fixed" || position === "sticky") {
     return false;
   }
 
-  const rect = element.getBoundingClientRect();
-  return rect.width > 0 && rect.height > 0;
+  const margin = 24;
+  const documentElement = document.documentElement;
+  const body = document.body;
+  const documentWidth = Math.max(
+    documentElement.scrollWidth,
+    body?.scrollWidth || 0,
+    window.innerWidth || 0
+  );
+  const documentHeight = Math.max(
+    documentElement.scrollHeight,
+    body?.scrollHeight || 0,
+    window.innerHeight || 0
+  );
+  const documentLeft = rect.left + (window.scrollX || window.pageXOffset || 0);
+  const documentTop = rect.top + (window.scrollY || window.pageYOffset || 0);
+  const documentRight = documentLeft + rect.width;
+  const documentBottom = documentTop + rect.height;
+
+  if (position === "absolute" && (documentRight < -margin || documentBottom < -margin)) {
+    return false;
+  }
+
+  return (
+    documentRight > -margin &&
+    documentBottom > -margin &&
+    documentLeft < documentWidth + margin &&
+    documentTop < documentHeight + margin
+  );
 }
 
 function isDisabledForInteraction(element) {
   return Boolean(
-    element.closest("[disabled], [aria-disabled='true']") ||
-      (typeof element.matches === "function" && element.matches(":disabled"))
+    element?.closest?.("[disabled]") ||
+      (typeof element?.matches === "function" && element.matches(":disabled"))
   );
+}
+
+function hasAriaDisabled(element) {
+  return Boolean(element?.closest?.("[aria-disabled='true']"));
+}
+
+function getPointerEventsBlocker(element) {
+  let current = element;
+
+  while (current && current.nodeType === Node.ELEMENT_NODE) {
+    const style = window.getComputedStyle(current);
+    if (style.pointerEvents === "none") {
+      return current;
+    }
+    current = current.parentElement;
+  }
+
+  return null;
+}
+
+function getCenterPointCoverage(element) {
+  const rect = element.getBoundingClientRect();
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const centerX = rect.left + rect.width / 2;
+  const centerY = rect.top + rect.height / 2;
+
+  if (
+    rect.width <= 0 ||
+    rect.height <= 0 ||
+    centerX < 0 ||
+    centerY < 0 ||
+    centerX >= viewportWidth ||
+    centerY >= viewportHeight
+  ) {
+    return {
+      checked: false,
+      covered: false,
+      coveringElement: ""
+    };
+  }
+
+  const topElement = document.elementFromPoint(centerX, centerY);
+  if (!topElement || topElement === element || element.contains(topElement)) {
+    return {
+      checked: true,
+      covered: false,
+      coveringElement: ""
+    };
+  }
+
+  return {
+    checked: true,
+    covered: true,
+    coveringElement: getElementDescriptor(topElement)
+  };
+}
+
+function isFocusableElement(element) {
+  if (!(element instanceof Element) || isDisabledForInteraction(element) || hasAriaDisabled(element)) {
+    return false;
+  }
+
+  if (element instanceof HTMLElement && element.isContentEditable) {
+    return true;
+  }
+
+  if (element instanceof HTMLElement && element.tabIndex >= 0) {
+    return true;
+  }
+
+  return matchesSelector(
+    element,
+    [
+      "a[href]",
+      "button",
+      "input:not([type='hidden'])",
+      "select",
+      "textarea",
+      "summary",
+      "iframe",
+      "dialog",
+      "[contenteditable='true']"
+    ].join(",")
+  );
+}
+
+function isClickableElement(element) {
+  return Boolean(
+    element instanceof Element &&
+      (isInteractiveAutomationElement(element) || hasClickHandlerSignal(element) || hasTabIndexClickSignal(element))
+  );
+}
+
+function hasInteractableBehavior(element) {
+  if (!(element instanceof Element)) {
+    return false;
+  }
+
+  const tag = element.tagName.toLowerCase();
+  const role = getRole(element);
+  return (
+    isInteractiveAutomationElement(element) ||
+    ["dialog", "alertdialog", "button", "link", "checkbox", "radio", "textbox", "combobox", "listbox", "option", "tab"].includes(role) ||
+    ["dialog", "details", "summary"].includes(tag) ||
+    element.hasAttribute("popover") ||
+    hasClickHandlerSignal(element)
+  );
+}
+
+function hasVisibleInteractableDescendant(element) {
+  if (!(element instanceof Element) || !element.querySelectorAll) {
+    return false;
+  }
+
+  const candidates = Array.from(
+    element.querySelectorAll(
+      [
+        "button",
+        "a[href]",
+        "input:not([type='hidden'])",
+        "select",
+        "textarea",
+        "[role='button']",
+        "[role='link']",
+        "[role='checkbox']",
+        "[role='radio']",
+        "[role='textbox']",
+        "[role='combobox']",
+        "[contenteditable='true']",
+        "[onclick]",
+        "[tabindex]"
+      ].join(",")
+    )
+  ).slice(0, 30);
+
+  return candidates.some((candidate) => isActuallyInteractable(candidate).isInteractable);
+}
+
+function getModalCandidateInfo(element) {
+  if (!(element instanceof Element)) {
+    return {
+      isModalCandidate: false,
+      reason: ""
+    };
+  }
+
+  const tag = element.tagName.toLowerCase();
+  const role = getRole(element);
+  const identityTokens = getModalIdentityTokens(element);
+
+  if (tag === "dialog") {
+    return {
+      isModalCandidate: true,
+      reason: "Native dialog element."
+    };
+  }
+  if (role === "dialog" || role === "alertdialog") {
+    return {
+      isModalCandidate: true,
+      reason: "Element uses a dialog role."
+    };
+  }
+  if (element.getAttribute("aria-modal") === "true") {
+    return {
+      isModalCandidate: true,
+      reason: "Element declares aria-modal=true."
+    };
+  }
+  if (element.hasAttribute("popover")) {
+    return {
+      isModalCandidate: true,
+      reason: "Element uses popover behavior."
+    };
+  }
+  if (/(modal|dialog|popup|overlay|drawer)/i.test(identityTokens)) {
+    return {
+      isModalCandidate: true,
+      reason: "Class, id, or attributes identify modal/dialog UI."
+    };
+  }
+  if (isFixedOrAbsoluteOverlayPattern(element)) {
+    return {
+      isModalCandidate: true,
+      reason: "Element matches a fixed or absolute overlay pattern."
+    };
+  }
+
+  return {
+    isModalCandidate: false,
+    reason: ""
+  };
+}
+
+function getModalIdentityTokens(element) {
+  return [
+    element.tagName || "",
+    element.id || "",
+    element.getAttribute("class") || "",
+    element.getAttribute("role") || "",
+    element.getAttribute("aria-modal") || "",
+    element.getAttribute("aria-label") || "",
+    element.getAttribute("data-testid") || "",
+    element.getAttribute("data-cy") || "",
+    element.getAttribute("data-test") || "",
+    element.getAttribute("data-component") || "",
+    element.getAttribute("data-ui") || "",
+    element.getAttribute("data-state") || "",
+    element.getAttribute("data-slot") || ""
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function isFixedOrAbsoluteOverlayPattern(element) {
+  if (!(element instanceof Element) || !element.isConnected) {
+    return false;
+  }
+
+  const style = window.getComputedStyle(element);
+  const position = style.position || "";
+  if (position !== "fixed" && position !== "absolute") {
+    return false;
+  }
+
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    return false;
+  }
+
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const viewportArea = viewportWidth * viewportHeight || 1;
+  const elementArea = rect.width * rect.height;
+  const zIndex = Number.parseInt(style.zIndex, 10);
+  const hasOverlaySize =
+    elementArea >= viewportArea * 0.25 ||
+    (rect.width >= viewportWidth * 0.6 && rect.height >= viewportHeight * 0.3);
+  const hasOverlayStacking = position === "fixed" || (Number.isFinite(zIndex) && zIndex >= 10);
+
+  return hasOverlaySize && hasOverlayStacking;
+}
+
+function getModalStateReason(candidateInfo, visibilityResult, interactabilityResult, descendantInteractable, isOpen) {
+  if (!candidateInfo.isModalCandidate) {
+    return "Element is not a modal/dialog candidate.";
+  }
+  if (isOpen) {
+    if (descendantInteractable) {
+      return "Dialog is visible and contains visible interactable content.";
+    }
+    return "Dialog is visible and not aria-hidden.";
+  }
+  if (!visibilityResult.isVisible) {
+    return visibilityResult.visibilityReason || "Modal candidate is not visible.";
+  }
+  return interactabilityResult.interactabilityReason || "Modal candidate is visible but not interactable.";
+}
+
+function getElementDescriptor(element) {
+  if (!(element instanceof Element)) {
+    return "";
+  }
+
+  const tag = element.tagName.toLowerCase();
+  const id = element.id ? `#${element.id}` : "";
+  const className = normalizeText(element.getAttribute("class") || "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((value) => `.${value}`)
+    .join("");
+  return `${tag}${id}${className}`.slice(0, 120);
+}
+
+function createPrimedModalStateCache(root = document) {
+  const cache = new WeakMap();
+  primeModalStateCache(cache, root);
+  return cache;
+}
+
+function primeModalStateCache(cache, root = document) {
+  for (const element of getModalCandidateElements(root)) {
+    rememberModalState(cache, element, buildModalState(element));
+  }
+}
+
+function getModalCandidateElements(root = document) {
+  const candidates = [];
+
+  if (root instanceof Element && getModalCandidateInfo(root).isModalCandidate) {
+    candidates.push(root);
+  }
+
+  const queryRoot = root instanceof Element || root instanceof Document ? root : document;
+  if (queryRoot.querySelectorAll) {
+    candidates.push(...Array.from(queryRoot.querySelectorAll(MODAL_CANDIDATE_SELECTOR)));
+  }
+
+  if (queryRoot === document && document.body?.children) {
+    candidates.push(...Array.from(document.body.children).filter((element) => getModalCandidateInfo(element).isModalCandidate));
+  }
+
+  return uniqueElements(candidates).filter((element) => getModalCandidateInfo(element).isModalCandidate);
+}
+
+function buildModalTransition(element, baseChangeType, detached, cache) {
+  const candidateInfo = getModalCandidateInfo(element);
+  const previousState = cache?.get(element) || null;
+  const isKnownModal = candidateInfo.isModalCandidate || previousState?.isModalCandidate;
+
+  if (!isKnownModal) {
+    return {
+      type: "",
+      snapshotType: "",
+      previousState,
+      currentState: buildModalState(element, { detached })
+    };
+  }
+
+  const currentState = detached
+    ? {
+        ...(previousState || buildModalState(element, { detached: true })),
+        isVisible: false,
+        isInteractable: false,
+        isOpen: false,
+        reason: "Modal candidate was detached from the DOM."
+      }
+    : buildModalState(element);
+  let type = "";
+
+  if (detached || baseChangeType === "removed node") {
+    type = previousState?.isOpen ? "closed" : "";
+  } else if (!previousState) {
+    type = currentState.isOpen ? "opened" : "";
+  } else if (!previousState.isOpen && currentState.isOpen) {
+    type = "opened";
+  } else if (previousState.isOpen && !currentState.isOpen) {
+    type = "closed";
+  }
+
+  if (!detached && cache) {
+    if (currentState.isModalCandidate) {
+      rememberModalState(cache, element, currentState);
+    } else {
+      cache.delete(element);
+    }
+  }
+
+  return {
+    type,
+    snapshotType: type === "opened" ? "Modal Opened" : type === "closed" ? "Modal Closed" : "",
+    previousState,
+    currentState
+  };
+}
+
+function rememberModalState(cache, element, modalState) {
+  if (!cache || !(element instanceof Element) || !modalState?.isModalCandidate) {
+    return;
+  }
+
+  cache.set(element, {
+    isModalCandidate: Boolean(modalState.isModalCandidate),
+    isOpen: Boolean(modalState.isOpen),
+    isVisible: Boolean(modalState.isVisible),
+    isInteractable: Boolean(modalState.isInteractable),
+    reason: modalState.reason || "",
+    candidateReason: modalState.candidateReason || ""
+  });
+}
+
+function collectModalTransitionEntries(cache) {
+  return getModalCandidateElements(document)
+    .map((element) => {
+      const transition = buildModalTransition(element, "visibility change", false, cache);
+      if (!transition.type) {
+        return null;
+      }
+      return {
+        element,
+        baseChangeType: "visibility change",
+        detached: false,
+        attributeName: "modalState",
+        modalTransition: transition.type,
+        modalTransitionDetails: transition,
+        modalState: transition.currentState
+      };
+    })
+    .filter(Boolean);
 }
 
 function chooseBestLocator(element, css, xpath, role, text) {

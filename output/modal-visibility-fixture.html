@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Modal Visibility Fixture</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 32px;
+      }
+
+      button {
+        margin: 8px 8px 8px 0;
+        padding: 10px 14px;
+      }
+
+      .modal,
+      .dialog,
+      .popup,
+      .overlay {
+        position: fixed;
+        inset: 20% auto auto 50%;
+        transform: translateX(-50%);
+        z-index: 100;
+        width: 360px;
+        min-height: 140px;
+        padding: 20px;
+        border: 1px solid #444;
+        background: white;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+      }
+
+      #loginModal {
+        display: none;
+      }
+
+      #preRenderedHiddenModal {
+        display: none;
+      }
+
+      #opacityHiddenModal {
+        opacity: 0;
+      }
+
+      #pointerEventsModal {
+        top: 55%;
+        pointer-events: none;
+      }
+
+      #normalVisibleModal {
+        left: 78%;
+        top: 20%;
+      }
+
+      .toast {
+        display: none;
+        margin-top: 20px;
+        padding: 12px;
+        border: 1px solid #999;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Modal Visibility Fixture</h1>
+    <button id="openLoginModal" type="button">Open Login Modal</button>
+    <button id="noopButton" type="button">No Visible Change</button>
+
+    <section
+      id="preRenderedHiddenModal"
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-hidden="true"
+      aria-label="Pre-rendered Hidden Modal"
+    >
+      <h2>Pre-rendered Hidden Modal</h2>
+      <button type="button">Hidden Action</button>
+    </section>
+
+    <section
+      id="displayHiddenModal"
+      class="dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-hidden="true"
+      hidden
+      aria-label="Display Hidden Modal"
+    >
+      <h2>Display Hidden Modal</h2>
+      <button type="button">Hidden Display Action</button>
+    </section>
+
+    <section
+      id="opacityHiddenModal"
+      class="popup"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Opacity Hidden Modal"
+    >
+      <h2>Opacity Hidden Modal</h2>
+      <button type="button">Invisible Action</button>
+    </section>
+
+    <section
+      id="pointerEventsModal"
+      class="overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Pointer Events Disabled Modal"
+    >
+      <h2>Pointer Events Disabled Modal</h2>
+      <button type="button">Blocked Action</button>
+    </section>
+
+    <section
+      id="normalVisibleModal"
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Normal Visible Modal"
+    >
+      <h2>Normal Visible Modal</h2>
+      <button type="button">Visible Action</button>
+    </section>
+
+    <section
+      id="loginModal"
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-hidden="true"
+      aria-label="Login Modal"
+    >
+      <h2>Login Modal</h2>
+      <label>
+        Username
+        <input id="usernameInput" type="text" name="username">
+      </label>
+      <button id="closeLoginModal" type="button">Close Login Modal</button>
+    </section>
+
+    <script>
+      const loginModal = document.getElementById("loginModal");
+
+      document.getElementById("openLoginModal").addEventListener("click", () => {
+        loginModal.style.display = "block";
+        loginModal.setAttribute("aria-hidden", "false");
+      });
+
+      document.getElementById("closeLoginModal").addEventListener("click", () => {
+        loginModal.style.display = "none";
+        loginModal.setAttribute("aria-hidden", "true");
+      });
+
+      document.getElementById("noopButton").addEventListener("click", () => {
+        document.body.dataset.noopClicks = String(Number(document.body.dataset.noopClicks || "0") + 1);
+      });
+    </script>
+  </body>
+</html>

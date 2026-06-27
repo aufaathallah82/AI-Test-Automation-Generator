@@ -11,6 +11,7 @@ const clearInteractionBtn = document.getElementById("clearInteractionBtn");
 const exportBtn = document.getElementById("exportBtn");
 const visibleOnlyInput = document.getElementById("visibleOnly");
 const includeHiddenInput = document.getElementById("includeHidden");
+const includeAssertionCandidatesInput = document.getElementById("includeAssertionCandidates");
 const statusEl = document.getElementById("status");
 const summaryEl = document.getElementById("summary");
 const previewEl = document.getElementById("preview");
@@ -34,6 +35,7 @@ function setButtonsBusy(isBusy) {
   exportBtn.disabled = isBusy || !latestScan;
   visibleOnlyInput.disabled = isBusy || isCapturing || isInteractionRecording;
   includeHiddenInput.disabled = isBusy || isCapturing || isInteractionRecording;
+  includeAssertionCandidatesInput.disabled = isBusy || isCapturing || isInteractionRecording;
 }
 
 function setCaptureState(active) {
@@ -48,7 +50,8 @@ function setInteractionState(active) {
 
 function getScanOptions() {
   return {
-    includeHidden: includeHiddenInput.checked
+    includeHidden: includeHiddenInput.checked,
+    includeAssertionCandidates: includeAssertionCandidatesInput.checked
   };
 }
 
@@ -73,6 +76,9 @@ function renderSummary(scan) {
     : Array.isArray(scan?.userFlows)
       ? scan.userFlows.length
       : 0;
+  const assertionCandidateCount = Array.isArray(scan?.assertionCandidates)
+    ? scan.assertionCandidates.length
+    : 0;
 
   summaryEl.innerHTML = `
     <div>
@@ -98,6 +104,10 @@ function renderSummary(scan) {
     <div>
       <dt>Recorded Flows</dt>
       <dd>${recordedFlowsCount}</dd>
+    </div>
+    <div>
+      <dt>Assertion Candidates</dt>
+      <dd>${assertionCandidateCount}</dd>
     </div>
     <div>
       <dt>URL</dt>
